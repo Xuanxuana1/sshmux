@@ -11,7 +11,7 @@
 ### Option A — Pre-built binary (no Go required)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxuan/sshmux/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Xuanxuana1/sshmux/main/install.sh | bash
 ```
 
 Detects your architecture (Intel / Apple Silicon) automatically, downloads the binary from the latest GitHub Release, installs it to `~/bin/sshmux`, and imports your SSH hosts.
@@ -25,7 +25,7 @@ export PATH="$HOME/bin:$PATH"
 ### Option B — Build from source (requires Go 1.21+)
 
 ```bash
-git clone https://github.com/liuxuan/sshmux.git
+git clone https://github.com/Xuanxuana1/sshmux.git
 cd sshmux
 make install
 ```
@@ -101,19 +101,15 @@ Once you establish an SSH connection, **SOCKS5 and HTTP proxies start automatica
 
 GPU servers and similar machines often have no direct internet access, but your Mac does. sshmux uses SSH reverse port forwarding to inject your local proxy into the remote server's environment automatically:
 
-1. Configure your Terminal Proxy address once:
-   ```bash
-   sshmux terminal-proxy on --http 127.0.0.1:7897 --socks 127.0.0.1:7897
-   ```
-2. Run `sshmux`, press `t` to confirm Terminal Proxy is on
-3. Press `c` to connect, then press `r` to enable Remote Proxy
-4. After SSH login, `http_proxy` / `https_proxy` are set automatically — `pip install`, `wget`, `curl` just work
+1. Run `sshmux`, press `t` to enable Terminal Proxy (defaults to `127.0.0.1:7897`, auto-initialized on first launch)
+2. Press `c` to connect, then press `r` to enable Remote Proxy
+3. After SSH login, `http_proxy` / `https_proxy` are set automatically — `pip install`, `wget`, `curl` just work
 
 ### Set proxy for the current terminal only
 
 Need proxy in one terminal window without touching system-wide settings:
 
-1. Press `t` to enable Terminal Proxy
+1. Press `t` to enable Terminal Proxy (defaults to `127.0.0.1:7897`, auto-initialized on first launch)
 2. All `curl`, `git`, `npm`, etc. in that terminal use the proxy
 3. Press `t` again when done — other terminals and apps are unaffected
 
@@ -129,7 +125,7 @@ Need browsers, Slack, and other GUI apps to use the proxy too:
 
 In shared server environments, teammates often run local proxies on different ports (7897, 1080, etc.). sshmux keeps proxy ports as a **single global setting**, so you only configure it once for all hosts:
 
-1. Press `p` to edit ports, enter your local port, press Enter — all hosts update instantly
+1. Press `p` to edit ports, enter your local port, press Enter — all hosts update instantly and Terminal Proxy addresses sync automatically
 2. Need internet access temporarily? Press `m` to enable system proxy, do your work, then press `m` to switch back
 
 ---
@@ -156,7 +152,7 @@ sshmux connect <alias>                                 # Connect (proxy starts a
 sshmux disconnect <alias>                              # Disconnect
 sshmux sync enable <alias>                             # Sync to macOS system proxy
 sshmux sync disable <alias>                            # Disable system proxy sync
-sshmux terminal-proxy on --http <addr> --socks <addr>  # Enable Terminal Proxy
+sshmux terminal-proxy on --http <addr> --socks <addr>  # Enable Terminal Proxy (custom addr; defaults to 127.0.0.1:7897)
 sshmux terminal-proxy off                              # Disable Terminal Proxy
 sshmux remote-proxy enable <alias>                     # Enable Remote Proxy
 sshmux remote-proxy disable <alias>                    # Disable Remote Proxy

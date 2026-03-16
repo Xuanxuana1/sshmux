@@ -80,6 +80,13 @@ func Run(runner ssh.Runner) error {
 		gcfg = state.DefaultGlobalConfig()
 	}
 
+	// Auto-initialize Terminal Proxy addresses on first launch.
+	if tp.HTTPAddr == "" && tp.SOCKSAddr == "" {
+		tp.HTTPAddr = fmt.Sprintf("127.0.0.1:%d", gcfg.HTTPPort)
+		tp.SOCKSAddr = fmt.Sprintf("127.0.0.1:%d", gcfg.SocksPort)
+		_ = state.SaveTerminalProxy(tp)
+	}
+
 	m := model{
 		hosts:     hosts,
 		termProxy: tp,
@@ -269,6 +276,16 @@ func (m model) confirmPorts() (tea.Model, tea.Cmd) {
 			_ = state.Save(h)
 			m.hosts[m.cursor] = *h
 		}
+	}
+
+	// Sync Terminal Proxy addresses to the new ports.
+	m.termProxy.HTTPAddr = fmt.Sprintf("127.0.0.1:%d", httpPort)
+	m.termProxy.SOCKSAddr = fmt.Sprintf("127.0.0.1:%d", socksPort)
+	if err := state.SaveTerminalProxy(m.termProxy); err != nil {
+		slog.Warn("failed to update terminal-proxy config", "err", err)
+	} else if m.termProxy.Enabled {
+		// Re-write proxy.env so the running terminal proxy reflects new ports.
+		_ = termproxy.WriteEnvFile(m.termProxy)
 	}
 
 	m.statusMsg = fmt.Sprintf("Ports updated — SOCKS :%d  HTTP :%d", socksPort, httpPort)

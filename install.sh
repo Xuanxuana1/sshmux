@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-REPO="liuxuan/sshmux"
+REPO="Xuanxuana1/sshmux"
 INSTALL_DIR="$HOME/bin"
 
 # Detect architecture

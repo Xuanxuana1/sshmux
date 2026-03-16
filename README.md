@@ -11,7 +11,7 @@
 ### 方式一：直接下载预编译二进制（无需 Go 环境）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxuan/sshmux/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Xuanxuana1/sshmux/main/install.sh | bash
 ```
 
 自动识别 Intel / Apple Silicon 架构，从 GitHub Releases 下载最新版本，安装到 `~/bin/sshmux`，并自动导入 SSH 主机。
@@ -25,7 +25,7 @@ export PATH="$HOME/bin:$PATH"
 ### 方式二：从源码编译（需要 Go 1.21+）
 
 ```bash
-git clone https://github.com/liuxuan/sshmux.git
+git clone https://github.com/Xuanxuana1/sshmux.git
 cd sshmux
 make install
 ```
@@ -103,19 +103,15 @@ sshmux
 
 远程服务器（如 GPU 机器）本身没有外网，但你的 Mac 有代理。sshmux 通过 SSH 反向端口转发，把本机代理自动注入到服务器的环境变量里：
 
-1. 先配置本机 Terminal Proxy 地址（只需一次）：
-   ```bash
-   sshmux terminal-proxy on --http 127.0.0.1:7897 --socks 127.0.0.1:7897
-   ```
-2. 运行 `sshmux`，按 `t` 确认 Terminal Proxy 已开启
-3. 按 `c` 建立 SSH 连接，按 `r` 开启 Remote Proxy
-4. SSH 登录服务器后，`http_proxy` / `https_proxy` 等环境变量自动生效，`pip install`、`wget`、`curl` 直接可用
+1. 运行 `sshmux`，按 `t` 开启 Terminal Proxy（默认地址 `127.0.0.1:7897`，首次启动自动初始化）
+2. 按 `c` 建立 SSH 连接，按 `r` 开启 Remote Proxy
+3. SSH 登录服务器后，`http_proxy` / `https_proxy` 等环境变量自动生效，`pip install`、`wget`、`curl` 直接可用
 
 ### 场景二：给本地终端临时配置代理
 
 需要在当前终端窗口走代理，但不想改动系统全局设置：
 
-1. 按 `t` 开启 Terminal Proxy
+1. 按 `t` 开启 Terminal Proxy（默认地址 `127.0.0.1:7897`，首次启动自动初始化）
 2. 当前终端的 `curl`、`git`、`npm` 等命令自动走代理
 3. 用完按 `t` 关闭，其他终端和应用完全不受影响
 
@@ -131,7 +127,7 @@ sshmux
 
 团队共用同一批服务器，每个人本地代理端口往往不同（有人用 7897，有人用 1080）。sshmux 把端口设计为**全局一处修改**，无需逐台服务器调整：
 
-1. 按 `p` 打开端口编辑，填入自己本地的端口，Enter 确认，所有主机立即生效
+1. 按 `p` 打开端口编辑，填入自己本地的端口，Enter 确认，所有主机立即生效，Terminal Proxy 地址同步更新
 2. 需要临时外网时按 `m` 开启系统代理，用完关闭，不影响其他人
 
 ---
@@ -158,7 +154,7 @@ sshmux connect <alias>                                 # 建立 SSH 连接（代
 sshmux disconnect <alias>                              # 断开 SSH 连接
 sshmux sync enable <alias>                             # 同步到 macOS 系统代理
 sshmux sync disable <alias>                            # 关闭系统代理同步
-sshmux terminal-proxy on --http <addr> --socks <addr>  # 开启 Terminal Proxy 并配置地址
+sshmux terminal-proxy on --http <addr> --socks <addr>  # 开启 Terminal Proxy（自定义地址，默认 127.0.0.1:7897）
 sshmux terminal-proxy off                              # 关闭 Terminal Proxy
 sshmux remote-proxy enable <alias>                     # 开启 Remote Proxy
 sshmux remote-proxy disable <alias>                    # 关闭 Remote Proxy
