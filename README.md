@@ -1,6 +1,40 @@
+**中文** | [English](./README_EN.md)
+
 # sshmux
 
 **macOS 本地 SSH 代理管理器**，让你用一个交互界面管理所有 SSH 连接和代理配置，彻底告别手敲命令。
+
+---
+
+## 安装
+
+### 方式一：直接下载预编译二进制（无需 Go 环境）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/liuxuan/sshmux/main/install.sh | bash
+```
+
+自动识别 Intel / Apple Silicon 架构，从 GitHub Releases 下载最新版本，安装到 `~/bin/sshmux`，并自动导入 SSH 主机。
+
+确保 `~/bin` 在你的 `PATH` 里（如没有，在 `~/.zshrc` 加一行）：
+
+```bash
+export PATH="$HOME/bin:$PATH"
+```
+
+### 方式二：从源码编译（需要 Go 1.21+）
+
+```bash
+git clone https://github.com/liuxuan/sshmux.git
+cd sshmux
+make install
+```
+
+**卸载**：
+
+```bash
+make uninstall
+```
 
 ---
 
