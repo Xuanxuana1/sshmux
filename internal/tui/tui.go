@@ -95,15 +95,13 @@ func Run(runner ssh.Runner) error {
 		runner:    runner,
 	}
 
-	// Redirect slog to a log file so WARN/ERROR output doesn't leak into the
-	// TUI. Alt screen isolates the display buffer, but stderr still bleeds
-	// through without this redirect.
+	// Redirect slog to a log file so WARN/ERROR output doesn't bleed into the TUI.
 	if logFile, logErr := openLogFile(); logErr == nil {
 		defer logFile.Close()
 		slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	}
 
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 	_, err = p.Run()
 	return err
 }
