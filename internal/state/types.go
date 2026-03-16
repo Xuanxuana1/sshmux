@@ -49,3 +49,14 @@ type TerminalProxyConfig struct {
 	HTTPAddr  string `json:"http_addr"`
 	SOCKSAddr string `json:"socks_addr"`
 }
+
+// GlobalConfig holds settings shared across all hosts.
+type GlobalConfig struct {
+	SocksPort int `json:"socks_port"`
+	HTTPPort  int `json:"http_port"`
+}
+
+// DefaultGlobalConfig returns sensible defaults.
+func DefaultGlobalConfig() *GlobalConfig {
+	return &GlobalConfig{SocksPort: 7897, HTTPPort: 7897}
+}

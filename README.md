@@ -1,0 +1,126 @@
+# sshmux
+
+**macOS 本地 SSH 代理管理器**，让你用一个交互界面管理所有 SSH 连接和代理配置，彻底告别手敲命令。
+
+---
+
+## 快速上手
+
+```bash
+sshmux
+```
+
+直接运行即可打开交互界面。
+
+---
+
+## 界面说明
+
+启动后你会看到一张主机列表表格，每一行是一台服务器：
+
+```
+  sshmux -- SSH Proxy Manager
+
+  +-------------------+-------------+---------+--------+
+  | Host              | SSH         | Sync    | RPx    |
+  +-------------------+-------------+---------+--------+
+> | my-server         | * online    | *       | x      |
+  | dev-box           | o offline   | x       | x      |
+  +-------------------+-------------+---------+--------+
+
+  [c] SSH  [m] macOS sync  [r] remote-proxy  [p] ports  [i] import
+  ------------------------------------------------------------------------
+  Proxy Ports  SOCKS :7897  HTTP :7897   [p] edit ports
+  Terminal Proxy  ON  http=127.0.0.1:7897  socks=127.0.0.1:7897   [t] toggle
+  [↑/↓] or [j/k] to navigate   [q] quit
+```
+
+建立 SSH 连接后，SOCKS5（端口 7897）和 HTTP 代理（端口 7897）**自动启用**，无需手动开关。
+
+### 列含义
+
+| 列 | 含义 |
+|----|------|
+| **Host** | SSH 配置里的别名（来自 `~/.ssh/config`） |
+| **SSH** | SSH 主连接状态。`* online` 表示已连接，`o offline` 表示未连接 |
+| **Sync** | macOS 系统代理同步状态。`*` 表示已将代理同步到系统网络设置 |
+| **RPx** | Remote Proxy 状态。将本机代理转发到远端服务器的环境变量中 |
+
+---
+
+## 键盘操作
+
+| 按键 | 功能 |
+|------|------|
+| `↑` / `↓` 或 `k` / `j` | 上下移动光标，选择主机 |
+| `c` | 切换所选主机的 SSH 连接（建立 / 断开）。连接后代理自动启动 |
+| `m` | 切换 macOS 系统代理同步（需要先建立 SSH 连接） |
+| `r` | 切换 Remote Proxy（需要先建立 SSH 连接，且 Terminal Proxy 已开启） |
+| `t` | 切换 Terminal Proxy（为当前终端会话注入 `http_proxy` / `https_proxy`） |
+| `p` | 编辑代理端口（SOCKS + HTTP 全局共用，Tab 切换字段，Enter 确认） |
+| `i` | 从 `~/.ssh/config` 导入所有主机 |
+| `q` 或 `Ctrl+C` | 退出 |
+
+---
+
+## 典型使用流程
+
+### 场景一：通过服务器上网
+
+1. 运行 `sshmux`，用 `↑↓` 选中目标主机
+2. 按 `c` 建立 SSH 连接，SSH 列变为 `* online`，SOCKS/HTTP 代理自动启动
+3. 按 `m` 同步到 macOS 系统代理，全局生效
+4. 按 `q` 退出，代理继续在后台运行
+
+### 场景二：给当前终端配置代理
+
+1. 先用 CLI 配置 Terminal Proxy 地址（只需一次）：
+   ```bash
+   sshmux terminal-proxy on --http 127.0.0.1:7897 --socks 127.0.0.1:7897
+   ```
+2. 运行 `sshmux`，按 `t` 开启 Terminal Proxy
+3. 当前终端的所有 `curl`、`git`、`npm` 等命令自动走代理
+
+### 场景三：让远端服务器也走代理
+
+1. 建立 SSH 连接（按 `c`）
+2. 确保 Terminal Proxy 已开启（按 `t`）
+3. 按 `r` 开启 Remote Proxy，SSH 登录后环境变量自动指向本机代理
+
+---
+
+## 第一次使用
+
+首次运行时主机列表是空的，按 `i` 从 `~/.ssh/config` 自动导入所有主机配置，导入后即可开始操作。
+
+---
+
+## 状态持久化
+
+所有开关状态都保存在 `~/.sshmux/` 下。重新打开界面时，状态会从磁盘恢复，不会丢失。
+
+---
+
+## CLI 子命令
+
+除了交互界面，sshmux 也支持命令行直接操作，适合脚本集成：
+
+```bash
+sshmux hosts                                           # 列出所有主机
+sshmux connect <alias>                                 # 建立 SSH 连接（代理自动启动）
+sshmux disconnect <alias>                              # 断开 SSH 连接
+sshmux sync enable <alias>                             # 同步到 macOS 系统代理
+sshmux sync disable <alias>                            # 关闭系统代理同步
+sshmux terminal-proxy on --http <addr> --socks <addr>  # 开启 Terminal Proxy 并配置地址
+sshmux terminal-proxy off                              # 关闭 Terminal Proxy
+sshmux remote-proxy enable <alias>                     # 开启 Remote Proxy
+sshmux remote-proxy disable <alias>                    # 关闭 Remote Proxy
+sshmux import-hosts                                    # 从 ~/.ssh/config 导入主机
+```
+
+---
+
+## 系统要求
+
+- macOS（依赖 `networksetup` 管理系统代理）
+- OpenSSH（macOS 自带）

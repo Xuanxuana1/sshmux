@@ -53,6 +53,7 @@ func main() {
 		newSyncCmd(),
 		newTerminalProxyCmd(),
 		newRemoteProxyCmd(),
+		newProxyServerCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

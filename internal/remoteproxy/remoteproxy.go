@@ -65,15 +65,22 @@ func (rp *RemoteProxy) Enable(ctx context.Context, host string, httpAddr, socksA
 		return fmt.Errorf("remote-proxy enable %s: write proxy.env: %w", host, err)
 	}
 
-	// Patch remote shell profiles (idempotent)
-	patchCmd := `grep -q 'sshmux: terminal proxy' ~/.zshrc 2>/dev/null || echo '# sshmux: terminal proxy
-[ -f "$HOME/.sshmux/proxy.env" ] && source "$HOME/.sshmux/proxy.env"' >> ~/.zshrc`
+	// Patch remote shell profiles (.bashrc and .zshrc, idempotent).
+	// The marker line prevents duplicate entries on repeated Enable calls.
+	const snippet = `# sshmux: terminal proxy
+[ -f "$HOME/.sshmux/proxy.env" ] && source "$HOME/.sshmux/proxy.env"`
 
-	if err := rp.runner.Run(ctx, "ssh",
-		"-o", "ControlPath="+cp,
-		host, patchCmd,
-	); err != nil {
-		slog.Warn("failed to patch remote .zshrc", "host", host, "err", err)
+	for _, rc := range []string{"~/.bashrc", "~/.zshrc"} {
+		patchCmd := fmt.Sprintf(
+			`grep -q 'sshmux: terminal proxy' %s 2>/dev/null || echo '%s' >> %s`,
+			rc, snippet, rc,
+		)
+		if err := rp.runner.Run(ctx, "ssh",
+			"-o", "ControlPath="+cp,
+			host, patchCmd,
+		); err != nil {
+			slog.Warn("failed to patch remote shell profile", "host", host, "rc", rc, "err", err)
+		}
 	}
 
 	slog.Info("remote-proxy enabled", "host", host, "http_addr", httpAddr, "socks_addr", socksAddr)

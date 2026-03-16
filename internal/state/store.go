@@ -135,6 +135,79 @@ func ListHosts() ([]*HostState, error) {
 	return hosts, nil
 }
 
+// globalConfigPath returns the path for the global config file.
+func globalConfigPath() (string, error) {
+	base, err := stateDir()
+	if err != nil {
+		return "", fmt.Errorf("global config path: %w", err)
+	}
+	return filepath.Join(base, "global.json"), nil
+}
+
+// LoadGlobalConfig reads the global config.
+// Returns defaults if the file does not exist.
+func LoadGlobalConfig() (*GlobalConfig, error) {
+	path, err := globalConfigPath()
+	if err != nil {
+		return nil, fmt.Errorf("load global config: %w", err)
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return DefaultGlobalConfig(), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read global config: %w", err)
+	}
+	cfg := DefaultGlobalConfig()
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	// Fill in zero values with defaults.
+	if cfg.SocksPort == 0 {
+		cfg.SocksPort = 7897
+	}
+	if cfg.HTTPPort == 0 {
+		cfg.HTTPPort = 7897
+	}
+	return cfg, nil
+}
+
+// SaveGlobalConfig persists the global config using atomic write.
+func SaveGlobalConfig(cfg *GlobalConfig) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal global config: %w", err)
+	}
+	base, err := stateDir()
+	if err != nil {
+		return fmt.Errorf("save global config: %w", err)
+	}
+	if err := os.MkdirAll(base, 0700); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(base, ".tmp-")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	tmp.Close()
+	path, err := globalConfigPath()
+	if err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("save global config: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("rename global config: %w", err)
+	}
+	return nil
+}
+
 // terminalProxyPath returns the path for the global terminal-proxy config.
 func terminalProxyPath() (string, error) {
 	base, err := stateDir()

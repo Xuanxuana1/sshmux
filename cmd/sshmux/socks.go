@@ -49,7 +49,7 @@ func newSocksCmd() *cobra.Command {
 			return nil
 		},
 	}
-	onCmd.Flags().IntVar(&port, "port", 1087, "SOCKS proxy port")
+	onCmd.Flags().IntVar(&port, "port", 7897, "SOCKS proxy port")
 
 	offCmd := &cobra.Command{
 		Use:   "off <host>",

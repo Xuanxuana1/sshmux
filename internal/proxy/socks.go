@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 
 	"github.com/liuxuan/sshmux/internal/ssh"
 )
@@ -20,6 +22,22 @@ func NewSOCKS(r ssh.Runner) *SOCKS {
 	return &SOCKS{runner: r}
 }
 
+func socksPidDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("get home dir: %w", err)
+	}
+	return filepath.Join(home, ".sshmux", "socks"), nil
+}
+
+func socksPidPath(host string) (string, error) {
+	dir, err := socksPidDir()
+	if err != nil {
+		return "", fmt.Errorf("socks pid path %s: %w", host, err)
+	}
+	return filepath.Join(dir, host+".pid"), nil
+}
+
 func sshControlPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -28,58 +46,90 @@ func sshControlPath() (string, error) {
 	return filepath.Join(home, ".ssh", "cm-%C"), nil
 }
 
-// Enable adds a DynamicForward on the given port via the ControlMaster socket.
+// Enable starts a background SSH slave session through the ControlMaster with
+// a DynamicForward on the given port.
+//
+// ssh -O forward -D does NOT support DynamicForward (only -L/-R). Instead we
+// start a multiplexed slave connection with -D and manage its lifecycle via a
+// PID file, mirroring the HTTP proxy pattern.
 func (s *SOCKS) Enable(ctx context.Context, host string, port int) error {
+	dir, err := socksPidDir()
+	if err != nil {
+		return fmt.Errorf("socks enable %s: %w", host, err)
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("socks enable %s: create dir: %w", host, err)
+	}
+
 	cp, err := sshControlPath()
 	if err != nil {
 		return fmt.Errorf("socks enable %s: %w", host, err)
 	}
-	slog.Debug("enabling socks forward", "host", host, "port", port)
-	if err := s.runner.Run(ctx, "ssh",
+
+	pidFile, err := socksPidPath(host)
+	if err != nil {
+		return fmt.Errorf("socks enable %s: %w", host, err)
+	}
+
+	cmd := exec.CommandContext(ctx, "ssh",
 		"-o", "ControlPath="+cp,
-		"-O", "forward",
+		"-o", "ControlMaster=no",
 		"-D", fmt.Sprintf("127.0.0.1:%d", port),
+		"-NnT",
 		host,
-	); err != nil {
+	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	slog.Debug("enabling socks forward", "host", host, "port", port)
+	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("socks enable %s port %d: %w", host, port, err)
 	}
+
+	pidStr := fmt.Sprintf("%d", cmd.Process.Pid)
+	if err := os.WriteFile(pidFile, []byte(pidStr), 0600); err != nil {
+		cmd.Process.Kill()
+		return fmt.Errorf("socks enable %s: write pid: %w", host, err)
+	}
+	cmd.Process.Release()
+
 	slog.Info("socks enabled", "host", host, "port", port)
 	return nil
 }
 
-// Disable removes the DynamicForward on the given port.
+// Disable kills the background SOCKS slave process for the given host.
 func (s *SOCKS) Disable(ctx context.Context, host string, port int) error {
-	cp, err := sshControlPath()
+	pidFile, err := socksPidPath(host)
 	if err != nil {
 		return fmt.Errorf("socks disable %s: %w", host, err)
 	}
-	slog.Debug("disabling socks forward", "host", host, "port", port)
-	if err := s.runner.Run(ctx, "ssh",
-		"-o", "ControlPath="+cp,
-		"-O", "cancel",
-		"-D", fmt.Sprintf("127.0.0.1:%d", port),
-		host,
-	); err != nil {
-		return fmt.Errorf("socks disable %s port %d: %w", host, port, err)
+
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			slog.Debug("socks pid file not found, already stopped", "host", host)
+			return nil
+		}
+		return fmt.Errorf("socks disable %s: read pid: %w", host, err)
 	}
+
+	pidStr := trimWhitespace(string(data))
+	slog.Debug("stopping socks forward", "host", host, "pid", pidStr)
+	if err := s.runner.Run(ctx, "kill", pidStr); err != nil {
+		slog.Warn("failed to kill socks process", "host", host, "pid", pidStr, "err", err)
+	}
+
+	os.Remove(pidFile)
 	slog.Info("socks disabled", "host", host, "port", port)
 	return nil
 }
 
-// SetPort changes the SOCKS port using the safe start-new, verify, stop-old pattern.
+// SetPort stops the old SOCKS forward and starts a new one on the new port.
 func (s *SOCKS) SetPort(ctx context.Context, host string, oldPort, newPort int) error {
 	slog.Debug("switching socks port", "host", host, "old_port", oldPort, "new_port", newPort)
-
-	// 1. Start new forward
-	if err := s.Enable(ctx, host, newPort); err != nil {
-		return fmt.Errorf("socks set-port %s: start new: %w", host, err)
-	}
-
-	// 2. Cancel old forward (best-effort)
 	if err := s.Disable(ctx, host, oldPort); err != nil {
-		slog.Warn("socks set-port: failed to cancel old forward", "host", host, "port", oldPort, "err", err)
+		slog.Warn("socks set-port: disable old", "host", host, "err", err)
 	}
-
-	slog.Info("socks port changed", "host", host, "old_port", oldPort, "new_port", newPort)
-	return nil
+	return s.Enable(ctx, host, newPort)
 }

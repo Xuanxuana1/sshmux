@@ -55,7 +55,7 @@ func newHTTPCmd() *cobra.Command {
 			return nil
 		},
 	}
-	onCmd.Flags().IntVar(&port, "port", 8118, "HTTP proxy port")
+	onCmd.Flags().IntVar(&port, "port", 7897, "HTTP proxy port")
 
 	offCmd := &cobra.Command{
 		Use:   "off <host>",

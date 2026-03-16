@@ -3,6 +3,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -36,16 +39,28 @@ var (
 	borderStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
+// editMode tracks whether the user is in port-editing mode.
+type editMode int
+
+const (
+	editNone  editMode = iota
+	editPorts          // 'p' key — edit global SOCKS + HTTP ports
+)
+
 // model holds all TUI state.
 type model struct {
-	hosts     []state.HostState
-	termProxy *state.TerminalProxyConfig
-	cursor    int
-	statusMsg string
-	statusErr bool
-	runner    ssh.Runner
-	width     int
-	height    int
+	hosts      []state.HostState
+	termProxy  *state.TerminalProxyConfig
+	globalCfg  *state.GlobalConfig
+	cursor     int
+	statusMsg  string
+	statusErr  bool
+	runner     ssh.Runner
+	width      int
+	height     int
+	editing    editMode
+	portField  int // 0 = SOCKS, 1 = HTTP
+	portInputs [2]string
 }
 
 // Run starts the interactive TUI.
@@ -60,16 +75,43 @@ func Run(runner ssh.Runner) error {
 		tp = &state.TerminalProxyConfig{}
 	}
 
+	gcfg, err := state.LoadGlobalConfig()
+	if err != nil {
+		gcfg = state.DefaultGlobalConfig()
+	}
+
 	m := model{
 		hosts:     hosts,
 		termProxy: tp,
+		globalCfg: gcfg,
 		cursor:    0,
 		runner:    runner,
+	}
+
+	// Redirect slog to a log file so WARN/ERROR output doesn't leak into the
+	// TUI. Alt screen isolates the display buffer, but stderr still bleeds
+	// through without this redirect.
+	if logFile, logErr := openLogFile(); logErr == nil {
+		defer logFile.Close()
+		slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
+}
+
+// openLogFile opens (or creates) the sshmux TUI log file.
+func openLogFile() (*os.File, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(home, ".sshmux")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(filepath.Join(dir, "tui.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 }
 
 func loadHosts() ([]state.HostState, error) {
@@ -98,6 +140,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// In edit mode, all keys are handled by the port editor.
+		if m.editing != editNone {
+			return m.handleEditKey(msg)
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -117,11 +164,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "c":
 			return m.toggleSSH()
 
-		case "s":
-			return m.toggleSOCKS()
-
-		case "h":
-			return m.toggleHTTP()
+		case "p":
+			return m.startEditPorts()
 
 		case "m":
 			return m.toggleMacSync()
@@ -137,6 +181,98 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	return m, nil
+}
+
+func (m model) startEditPorts() (tea.Model, tea.Cmd) {
+	m.editing = editPorts
+	m.portField = 0
+	m.portInputs[0] = fmt.Sprintf("%d", m.globalCfg.SocksPort)
+	m.portInputs[1] = fmt.Sprintf("%d", m.globalCfg.HTTPPort)
+	m.statusMsg = ""
+	return m, nil
+}
+
+func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.editing = editNone
+		return m, nil
+	case "enter":
+		return m.confirmPorts()
+	case "tab":
+		m.portField = 1 - m.portField // toggle between 0 and 1
+		return m, nil
+	case "backspace":
+		if len(m.portInputs[m.portField]) > 0 {
+			m.portInputs[m.portField] = m.portInputs[m.portField][:len(m.portInputs[m.portField])-1]
+		}
+		return m, nil
+	default:
+		s := msg.String()
+		if len(s) == 1 && s >= "0" && s <= "9" && len(m.portInputs[m.portField]) < 5 {
+			m.portInputs[m.portField] += s
+		}
+		return m, nil
+	}
+}
+
+func (m model) confirmPorts() (tea.Model, tea.Cmd) {
+	m.editing = editNone
+	ctx := context.Background()
+	h := m.selectedHost()
+
+	socksPort, err := strconv.Atoi(m.portInputs[0])
+	if err != nil || socksPort <= 0 || socksPort > 65535 {
+		m.statusMsg = fmt.Sprintf("invalid SOCKS port: %q", m.portInputs[0])
+		m.statusErr = true
+		return m, nil
+	}
+	httpPort, err := strconv.Atoi(m.portInputs[1])
+	if err != nil || httpPort <= 0 || httpPort > 65535 {
+		m.statusMsg = fmt.Sprintf("invalid HTTP port: %q", m.portInputs[1])
+		m.statusErr = true
+		return m, nil
+	}
+
+	oldSocks := m.globalCfg.SocksPort
+	oldHTTP := m.globalCfg.HTTPPort
+	m.globalCfg.SocksPort = socksPort
+	m.globalCfg.HTTPPort = httpPort
+	if err := state.SaveGlobalConfig(m.globalCfg); err != nil {
+		m.statusMsg = fmt.Sprintf("save global config failed: %v", err)
+		m.statusErr = true
+		return m, nil
+	}
+
+	// Hot-switch selected host's running proxies if ports changed.
+	if h != nil {
+		if h.SocksEnabled && oldSocks != socksPort {
+			socks := proxy.NewSOCKS(m.runner)
+			if err := socks.SetPort(ctx, h.HostAlias, oldSocks, socksPort); err != nil {
+				m.statusMsg = fmt.Sprintf("SOCKS port switch failed: %v", err)
+				m.statusErr = true
+				return m, nil
+			}
+			h.SocksPort = socksPort
+			_ = state.Save(h)
+			m.hosts[m.cursor] = *h
+		}
+		if h.HTTPEnabled && oldHTTP != httpPort {
+			httpProxy := proxy.NewHTTP(m.runner)
+			if err := httpProxy.SetPort(ctx, h.HostAlias, oldHTTP, httpPort, socksPort); err != nil {
+				m.statusMsg = fmt.Sprintf("HTTP port switch failed: %v", err)
+				m.statusErr = true
+				return m, nil
+			}
+			h.HTTPPort = httpPort
+			_ = state.Save(h)
+			m.hosts[m.cursor] = *h
+		}
+	}
+
+	m.statusMsg = fmt.Sprintf("Ports updated — SOCKS :%d  HTTP :%d", socksPort, httpPort)
+	m.statusErr = false
 	return m, nil
 }
 
@@ -156,6 +292,11 @@ func (m model) toggleSSH() (tea.Model, tea.Cmd) {
 	master := ssh.NewMaster(m.runner)
 
 	if h.MasterConnected {
+		if err := m.disableLocalProxies(ctx, h); err != nil {
+			m.statusMsg = fmt.Sprintf("disable local proxies failed: %v", err)
+			m.statusErr = true
+			return m, nil
+		}
 		if err := master.Disconnect(ctx, h.HostAlias); err != nil {
 			m.statusMsg = fmt.Sprintf("disconnect failed: %v", err)
 			m.statusErr = true
@@ -176,6 +317,14 @@ func (m model) toggleSSH() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		h.MasterConnected = true
+		if err := m.enableLocalProxies(ctx, h); err != nil {
+			h.LastError = err.Error()
+			_ = state.Save(h)
+			m.hosts[m.cursor] = *h
+			m.statusMsg = fmt.Sprintf("SSH connected but local proxies failed: %v", err)
+			m.statusErr = true
+			return m, nil
+		}
 		h.LastError = ""
 		_ = state.Save(h)
 		m.hosts[m.cursor] = *h
@@ -183,6 +332,62 @@ func (m model) toggleSSH() (tea.Model, tea.Cmd) {
 		m.statusErr = false
 	}
 	return m, nil
+}
+
+func (m model) enableLocalProxies(ctx context.Context, h *state.HostState) error {
+	socksPort := m.globalCfg.SocksPort
+	httpPort := m.globalCfg.HTTPPort
+
+	if h.SocksEnabled && h.SocksPort != 0 && h.SocksPort != socksPort {
+		socks := proxy.NewSOCKS(m.runner)
+		if err := socks.SetPort(ctx, h.HostAlias, h.SocksPort, socksPort); err != nil {
+			return fmt.Errorf("switch SOCKS port: %w", err)
+		}
+	}
+	if !h.SocksEnabled || h.SocksPort != socksPort {
+		socks := proxy.NewSOCKS(m.runner)
+		if err := socks.Enable(ctx, h.HostAlias, socksPort); err != nil {
+			return fmt.Errorf("enable SOCKS: %w", err)
+		}
+	}
+	h.SocksEnabled = true
+	h.SocksPort = socksPort
+
+	if h.HTTPEnabled && h.HTTPPort != 0 && h.HTTPPort != httpPort {
+		httpProxy := proxy.NewHTTP(m.runner)
+		if err := httpProxy.SetPort(ctx, h.HostAlias, h.HTTPPort, httpPort, socksPort); err != nil {
+			return fmt.Errorf("switch HTTP port: %w", err)
+		}
+	}
+	if !h.HTTPEnabled || h.HTTPPort != httpPort {
+		httpProxy := proxy.NewHTTP(m.runner)
+		if err := httpProxy.Enable(ctx, h.HostAlias, httpPort, socksPort); err != nil {
+			return fmt.Errorf("enable HTTP: %w", err)
+		}
+	}
+	h.HTTPEnabled = true
+	h.HTTPPort = httpPort
+	return nil
+}
+
+func (m model) disableLocalProxies(ctx context.Context, h *state.HostState) error {
+	if h.HTTPEnabled {
+		httpProxy := proxy.NewHTTP(m.runner)
+		if err := httpProxy.Disable(ctx, h.HostAlias); err != nil {
+			return fmt.Errorf("disable HTTP: %w", err)
+		}
+	}
+	if h.SocksEnabled {
+		socks := proxy.NewSOCKS(m.runner)
+		if err := socks.Disable(ctx, h.HostAlias, h.SocksPort); err != nil {
+			return fmt.Errorf("disable SOCKS: %w", err)
+		}
+	}
+	h.SocksEnabled = false
+	h.SocksPort = 0
+	h.HTTPEnabled = false
+	h.HTTPPort = 0
+	return nil
 }
 
 func (m model) toggleSOCKS() (tea.Model, tea.Cmd) {
@@ -193,10 +398,7 @@ func (m model) toggleSOCKS() (tea.Model, tea.Cmd) {
 	ctx := context.Background()
 	socks := proxy.NewSOCKS(m.runner)
 
-	port := h.SocksPort
-	if port == 0 {
-		port = 1087
-	}
+	port := m.globalCfg.SocksPort
 
 	if h.SocksEnabled {
 		if err := socks.Disable(ctx, h.HostAlias, h.SocksPort); err != nil {
@@ -235,10 +437,7 @@ func (m model) toggleHTTP() (tea.Model, tea.Cmd) {
 	ctx := context.Background()
 	httpProxy := proxy.NewHTTP(m.runner)
 
-	port := h.HTTPPort
-	if port == 0 {
-		port = 8118
-	}
+	port := m.globalCfg.HTTPPort
 
 	if h.HTTPEnabled {
 		if err := httpProxy.Disable(ctx, h.HostAlias); err != nil {
@@ -300,11 +499,18 @@ func (m model) toggleMacSync() (tea.Model, tea.Cmd) {
 		m.statusMsg = fmt.Sprintf("macOS sync disabled on %s", h.HostAlias)
 		m.statusErr = false
 	} else {
-		if !h.SocksEnabled {
-			m.statusMsg = fmt.Sprintf("SOCKS must be enabled first on %s", h.HostAlias)
+		if !h.MasterConnected {
+			m.statusMsg = fmt.Sprintf("SSH not connected — press [c] to connect %s first", h.HostAlias)
 			m.statusErr = true
 			return m, nil
 		}
+		if err := m.enableLocalProxies(ctx, h); err != nil {
+			m.statusMsg = fmt.Sprintf("enable local proxies failed: %v", err)
+			m.statusErr = true
+			return m, nil
+		}
+		_ = state.Save(h)
+		m.hosts[m.cursor] = *h
 		svc := h.MacNetworkService
 		if svc == "" {
 			svc = "Wi-Fi"
@@ -348,7 +554,7 @@ func (m model) toggleRemoteProxy() (tea.Model, tea.Cmd) {
 		m.statusErr = false
 	} else {
 		if !h.MasterConnected {
-			m.statusMsg = fmt.Sprintf("SSH must be connected first on %s", h.HostAlias)
+			m.statusMsg = fmt.Sprintf("SSH not connected — press [c] to connect %s first", h.HostAlias)
 			m.statusErr = true
 			return m, nil
 		}
@@ -503,13 +709,11 @@ func (m model) View() string {
 	b.WriteString("  ")
 	b.WriteString(renderHelp("[c]", "SSH"))
 	b.WriteString("  ")
-	b.WriteString(renderHelp("[s]", "SOCKS"))
-	b.WriteString("  ")
-	b.WriteString(renderHelp("[h]", "HTTP"))
-	b.WriteString("  ")
 	b.WriteString(renderHelp("[m]", "macOS sync"))
 	b.WriteString("  ")
 	b.WriteString(renderHelp("[r]", "remote-proxy"))
+	b.WriteString("  ")
+	b.WriteString(renderHelp("[p]", "ports"))
 	b.WriteString("  ")
 	b.WriteString(renderHelp("[i]", "import"))
 	b.WriteString("\n")
@@ -517,6 +721,17 @@ func (m model) View() string {
 	// Separator
 	b.WriteString("  ")
 	b.WriteString(dimStyle.Render(strings.Repeat("-", 72)))
+	b.WriteString("\n")
+
+	// Global proxy ports line
+	b.WriteString("  Proxy Ports  ")
+	b.WriteString(dimStyle.Render("SOCKS"))
+	b.WriteString(" " + helpKeyStyle.Render(fmt.Sprintf(":%d", m.globalCfg.SocksPort)))
+	b.WriteString("  ")
+	b.WriteString(dimStyle.Render("HTTP"))
+	b.WriteString(" " + helpKeyStyle.Render(fmt.Sprintf(":%d", m.globalCfg.HTTPPort)))
+	b.WriteString("   ")
+	b.WriteString(renderHelp("[p]", "edit ports"))
 	b.WriteString("\n")
 
 	// Terminal proxy status line
@@ -538,18 +753,42 @@ func (m model) View() string {
 
 	// Navigation help
 	b.WriteString("  ")
-	b.WriteString(renderHelp("[up/down / jk]", "navigate"))
+	b.WriteString(renderHelp("[↑/↓] or [j/k]", "to navigate"))
 	b.WriteString("   ")
 	b.WriteString(renderHelp("[q]", "quit"))
 	b.WriteString("\n")
 
-	// Status message
+	// Port editor panel (p key)
+	if m.editing == editPorts {
+		b.WriteString("\n")
+		for i, label := range []string{"SOCKS", "HTTP "} {
+			b.WriteString("  ")
+			b.WriteString(dimStyle.Render(label + ":"))
+			b.WriteString("  ")
+			if m.portField == i {
+				b.WriteString(helpKeyStyle.Render(m.portInputs[i]))
+				b.WriteString(cursorStyle.Render("_"))
+			} else {
+				b.WriteString(m.portInputs[i])
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("  ")
+		b.WriteString(dimStyle.Render("[tab] switch field  [enter] confirm  [esc] cancel"))
+		b.WriteString("\n")
+	}
+
+	// Status message (word-wrapped to terminal width)
 	if m.statusMsg != "" {
+		maxW := m.width - 4
+		if maxW < 40 {
+			maxW = 40
+		}
 		b.WriteString("\n  ")
 		if m.statusErr {
-			b.WriteString(statusErrStyle.Render(m.statusMsg))
+			b.WriteString(statusErrStyle.Width(maxW).Render(m.statusMsg))
 		} else {
-			b.WriteString(statusOKStyle.Render(m.statusMsg))
+			b.WriteString(statusOKStyle.Width(maxW).Render(m.statusMsg))
 		}
 		b.WriteString("\n")
 	}
@@ -563,12 +802,10 @@ func renderHelp(key, desc string) string {
 
 // Column widths for the table.
 const (
-	colHost  = 18
-	colSSH   = 12
-	colSOCKS = 12
-	colHTTP  = 8
-	colSync  = 8
-	colRPx   = 7
+	colHost = 18
+	colSSH  = 12
+	colSync = 8
+	colRPx  = 7
 )
 
 func (m model) renderTable() string {
@@ -579,8 +816,6 @@ func (m model) renderTable() string {
 	b.WriteString(borderStyle.Render(
 		"+" + strings.Repeat("-", colHost+1) +
 			"+" + strings.Repeat("-", colSSH+1) +
-			"+" + strings.Repeat("-", colSOCKS+1) +
-			"+" + strings.Repeat("-", colHTTP+1) +
 			"+" + strings.Repeat("-", colSync+1) +
 			"+" + strings.Repeat("-", colRPx+1) + "+"))
 	b.WriteString("\n")
@@ -595,12 +830,6 @@ func (m model) renderTable() string {
 	b.WriteString(headerStyle.Render(pad("SSH", colSSH)))
 	b.WriteString(borderStyle.Render("|"))
 	b.WriteString(" ")
-	b.WriteString(headerStyle.Render(pad("SOCKS", colSOCKS)))
-	b.WriteString(borderStyle.Render("|"))
-	b.WriteString(" ")
-	b.WriteString(headerStyle.Render(pad("HTTP", colHTTP)))
-	b.WriteString(borderStyle.Render("|"))
-	b.WriteString(" ")
 	b.WriteString(headerStyle.Render(pad("Sync", colSync)))
 	b.WriteString(borderStyle.Render("|"))
 	b.WriteString(" ")
@@ -613,8 +842,6 @@ func (m model) renderTable() string {
 	b.WriteString(borderStyle.Render(
 		"+" + strings.Repeat("-", colHost+1) +
 			"+" + strings.Repeat("-", colSSH+1) +
-			"+" + strings.Repeat("-", colSOCKS+1) +
-			"+" + strings.Repeat("-", colHTTP+1) +
 			"+" + strings.Repeat("-", colSync+1) +
 			"+" + strings.Repeat("-", colRPx+1) + "+"))
 	b.WriteString("\n")
@@ -643,22 +870,6 @@ func (m model) renderTable() string {
 			sshStatus = offlineStyle.Render("o") + " offline"
 		}
 
-		// SOCKS status
-		var socksStatus string
-		if h.SocksEnabled {
-			socksStatus = onlineStyle.Render("*") + " :" + fmt.Sprintf("%d", h.SocksPort)
-		} else {
-			socksStatus = disabledStyle.Render("x")
-		}
-
-		// HTTP status
-		var httpStatus string
-		if h.HTTPEnabled {
-			httpStatus = onlineStyle.Render("*") + " :" + fmt.Sprintf("%d", h.HTTPPort)
-		} else {
-			httpStatus = disabledStyle.Render("x")
-		}
-
 		// Mac sync status
 		var syncStatus string
 		if h.MacSyncEnabled {
@@ -681,10 +892,6 @@ func (m model) renderTable() string {
 		row += borderStyle.Render("|")
 		row += " " + pad(sshStatus, colSSH)
 		row += borderStyle.Render("|")
-		row += " " + pad(socksStatus, colSOCKS)
-		row += borderStyle.Render("|")
-		row += " " + pad(httpStatus, colHTTP)
-		row += borderStyle.Render("|")
 		row += " " + pad(syncStatus, colSync)
 		row += borderStyle.Render("|")
 		row += " " + pad(rpxStatus, colRPx)
@@ -705,8 +912,6 @@ func (m model) renderTable() string {
 	b.WriteString(borderStyle.Render(
 		"+" + strings.Repeat("-", colHost+1) +
 			"+" + strings.Repeat("-", colSSH+1) +
-			"+" + strings.Repeat("-", colSOCKS+1) +
-			"+" + strings.Repeat("-", colHTTP+1) +
 			"+" + strings.Repeat("-", colSync+1) +
 			"+" + strings.Repeat("-", colRPx+1) + "+"))
 	b.WriteString("\n")
