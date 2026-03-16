@@ -119,6 +119,14 @@ Once you establish an SSH connection, **SOCKS5 and HTTP proxies start automatica
 2. Enable Terminal Proxy (press `t`)
 3. Press `r` to enable Remote Proxy — `http_proxy` / `https_proxy` are set automatically on login
 
+### Team collaboration — different proxy ports across machines
+
+In shared server environments, teammates often run local proxies on different ports (7897, 1080, etc.). sshmux keeps proxy ports as a **single global setting**, so you only configure it once for all hosts:
+
+1. Press `p` to edit ports, enter your local port, press Enter — all hosts update instantly
+2. Need internet access temporarily? Press `m` to enable macOS system proxy, do your work, then press `m` again to switch back to the internal network
+3. Need proxy in just one terminal without affecting other apps? Use `t` to toggle Terminal Proxy — it only injects env vars into the current shell session
+
 ---
 
 ## First Run
