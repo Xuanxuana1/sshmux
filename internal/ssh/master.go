@@ -47,7 +47,17 @@ func (m *Master) Connect(ctx context.Context, host string) error {
 }
 
 // Disconnect stops the SSH master connection.
+// If the control socket is already gone (e.g. dropped by network interruption),
+// it returns nil — the connection is effectively already disconnected.
 func (m *Master) Disconnect(ctx context.Context, host string) error {
+	connected, err := m.IsConnected(ctx, host)
+	if err != nil {
+		return fmt.Errorf("disconnect %s: %w", host, err)
+	}
+	if !connected {
+		slog.Debug("ssh master already disconnected, clearing stale state", "host", host)
+		return nil
+	}
 	cp, err := controlPath()
 	if err != nil {
 		return fmt.Errorf("disconnect %s: %w", host, err)

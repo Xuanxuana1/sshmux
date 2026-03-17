@@ -128,6 +128,37 @@ func TestPatchProfile_CreatesFile(t *testing.T) {
 	}
 }
 
+func TestPatchProfile_UpgradesOldFormat(t *testing.T) {
+	dir := t.TempDir()
+	profile := filepath.Join(dir, ".zshrc")
+
+	// Write profile with old single-line format
+	oldContent := "# existing\n" + markerLine + "\n" + oldSourceLine + "\n"
+	if err := os.WriteFile(profile, []byte(oldContent), 0644); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+
+	if err := PatchProfileAt(profile); err != nil {
+		t.Fatalf("PatchProfileAt: %v", err)
+	}
+
+	data, _ := os.ReadFile(profile)
+	content := string(data)
+
+	if strings.Contains(content, oldSourceLine) {
+		t.Error("old single-line format should have been replaced")
+	}
+	if !strings.Contains(content, "unset http_proxy") {
+		t.Error("new if/else block with unset not found")
+	}
+	if strings.Count(content, markerLine) != 1 {
+		t.Errorf("marker count = %d, want 1", strings.Count(content, markerLine))
+	}
+	if !strings.HasPrefix(content, "# existing\n") {
+		t.Error("content before marker was modified")
+	}
+}
+
 func TestPatchProfile_PreservesExistingContent(t *testing.T) {
 	dir := t.TempDir()
 	profile := filepath.Join(dir, ".zshrc")

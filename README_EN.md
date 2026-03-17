@@ -16,6 +16,8 @@ curl -fsSL https://raw.githubusercontent.com/Xuanxuana1/sshmux/main/install.sh |
 
 Detects your architecture (Intel / Apple Silicon) automatically, downloads the binary from the latest GitHub Release, installs it to `~/bin/sshmux`, and imports your SSH hosts.
 
+> After installation, `~/bin/sshmux` is a lightweight wrapper; the real binary lives at `~/.sshmux/bin/sshmux-real`.
+
 Make sure `~/bin` is in your `PATH` (add to `~/.zshrc` if needed):
 
 ```bash

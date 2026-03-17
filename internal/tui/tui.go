@@ -43,8 +43,9 @@ var (
 type editMode int
 
 const (
-	editNone  editMode = iota
-	editPorts          // 'p' key — edit global SOCKS + HTTP ports
+	editNone    editMode = iota
+	editPorts            // 'p' key — edit global SOCKS + HTTP ports
+	editNewHost          // 'n' key — create a new host
 )
 
 // model holds all TUI state.
@@ -61,6 +62,9 @@ type model struct {
 	editing    editMode
 	portField  int // 0 = SOCKS, 1 = HTTP
 	portInputs [2]string
+
+	newHostField  int // 0=alias 1=hostname 2=user 3=port
+	newHostInputs [4]string
 }
 
 // Run starts the interactive TUI.
@@ -181,6 +185,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "i":
 			return m.importHosts()
 
+		case "n":
+			return m.startNewHost()
+
 		case "t":
 			return m.toggleTerminalProxy()
 		}
@@ -199,6 +206,9 @@ func (m model) startEditPorts() (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.editing == editNewHost {
+		return m.handleNewHostKey(msg)
+	}
 	switch msg.String() {
 	case "esc":
 		m.editing = editNone
@@ -287,6 +297,117 @@ func (m model) confirmPorts() (tea.Model, tea.Cmd) {
 	}
 
 	m.statusMsg = fmt.Sprintf("Ports updated — SOCKS :%d  HTTP :%d", socksPort, httpPort)
+	m.statusErr = false
+	return m, nil
+}
+
+func (m model) startNewHost() (tea.Model, tea.Cmd) {
+	m.editing = editNewHost
+	m.newHostField = 0
+	m.newHostInputs = [4]string{}
+	m.statusMsg = ""
+	return m, nil
+}
+
+func (m model) handleNewHostKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	const fieldCount = 4
+	switch msg.String() {
+	case "esc":
+		m.editing = editNone
+		return m, nil
+	case "enter":
+		return m.confirmNewHost()
+	case "tab":
+		m.newHostField = (m.newHostField + 1) % fieldCount
+		return m, nil
+	case "shift+tab":
+		m.newHostField = (m.newHostField - 1 + fieldCount) % fieldCount
+		return m, nil
+	case "backspace":
+		f := m.newHostField
+		if len(m.newHostInputs[f]) > 0 {
+			m.newHostInputs[f] = m.newHostInputs[f][:len(m.newHostInputs[f])-1]
+		}
+		return m, nil
+	default:
+		s := msg.String()
+		if len(s) == 1 && s[0] >= 0x20 {
+			m.newHostInputs[m.newHostField] += s
+		}
+		return m, nil
+	}
+}
+
+func (m model) confirmNewHost() (tea.Model, tea.Cmd) {
+	alias := strings.TrimSpace(m.newHostInputs[0])
+	hostname := strings.TrimSpace(m.newHostInputs[1])
+	user := strings.TrimSpace(m.newHostInputs[2])
+	portStr := strings.TrimSpace(m.newHostInputs[3])
+
+	if alias == "" {
+		m.statusMsg = "host alias is required"
+		m.statusErr = true
+		return m, nil
+	}
+	if hostname == "" {
+		m.statusMsg = "hostname is required"
+		m.statusErr = true
+		return m, nil
+	}
+
+	port := 0
+	if portStr != "" {
+		p, err := strconv.Atoi(portStr)
+		if err != nil || p <= 0 || p > 65535 {
+			m.statusMsg = fmt.Sprintf("invalid port: %q", portStr)
+			m.statusErr = true
+			return m, nil
+		}
+		port = p
+	}
+
+	existing, err := state.Load(alias)
+	if err != nil {
+		m.statusMsg = fmt.Sprintf("add host failed: %v", err)
+		m.statusErr = true
+		m.editing = editNone
+		return m, nil
+	}
+	if existing != nil {
+		m.statusMsg = fmt.Sprintf("host %q already exists", alias)
+		m.statusErr = true
+		return m, nil
+	}
+
+	h := &state.HostState{
+		HostAlias: alias,
+		Hostname:  hostname,
+		User:      user,
+		Port:      port,
+	}
+	if err := state.Save(h); err != nil {
+		m.statusMsg = fmt.Sprintf("add host failed: %v", err)
+		m.statusErr = true
+		m.editing = editNone
+		return m, nil
+	}
+
+	hosts, err := loadHosts()
+	if err != nil {
+		m.statusMsg = fmt.Sprintf("host added but reload failed: %v", err)
+		m.statusErr = true
+		m.editing = editNone
+		return m, nil
+	}
+	m.editing = editNone
+	m.hosts = hosts
+	for i, host := range m.hosts {
+		if host.HostAlias == alias {
+			m.cursor = i
+			break
+		}
+	}
+	m.statusMsg = fmt.Sprintf("Host %q added", alias)
 	m.statusErr = false
 	return m, nil
 }
@@ -731,6 +852,8 @@ func (m model) View() string {
 	b.WriteString(renderHelp("[p]", "ports"))
 	b.WriteString("  ")
 	b.WriteString(renderHelp("[i]", "import"))
+	b.WriteString("  ")
+	b.WriteString(renderHelp("[n]", "new host"))
 	b.WriteString("\n")
 
 	// Separator
@@ -790,6 +913,29 @@ func (m model) View() string {
 		}
 		b.WriteString("  ")
 		b.WriteString(dimStyle.Render("[tab] switch field  [enter] confirm  [esc] cancel"))
+		b.WriteString("\n")
+	}
+
+	// New host form (n key)
+	if m.editing == editNewHost {
+		b.WriteString("\n")
+		labels := []string{"Alias   ", "Hostname", "User    ", "Port    "}
+		hints := []string{" *required", " *required", "", " (default 22)"}
+		for i, label := range labels {
+			b.WriteString("  ")
+			b.WriteString(dimStyle.Render(label + ":"))
+			b.WriteString("  ")
+			if m.newHostField == i {
+				b.WriteString(helpKeyStyle.Render(m.newHostInputs[i]))
+				b.WriteString(cursorStyle.Render("_"))
+			} else {
+				b.WriteString(m.newHostInputs[i])
+			}
+			b.WriteString(dimStyle.Render(hints[i]))
+			b.WriteString("\n")
+		}
+		b.WriteString("  ")
+		b.WriteString(dimStyle.Render("[tab] next field  [shift+tab] prev  [enter] confirm  [esc] cancel"))
 		b.WriteString("\n")
 	}
 

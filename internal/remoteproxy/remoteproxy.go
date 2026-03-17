@@ -66,21 +66,35 @@ func (rp *RemoteProxy) Enable(ctx context.Context, host string, httpAddr, socksA
 	}
 
 	// Patch remote shell profiles (.bashrc and .zshrc, idempotent).
-	// The marker line prevents duplicate entries on repeated Enable calls.
-	const snippet = `# sshmux: terminal proxy
-[ -f "$HOME/.sshmux/proxy.env" ] && source "$HOME/.sshmux/proxy.env"`
-
-	for _, rc := range []string{"~/.bashrc", "~/.zshrc"} {
-		patchCmd := fmt.Sprintf(
-			`grep -q 'sshmux: terminal proxy' %s 2>/dev/null || echo '%s' >> %s`,
-			rc, snippet, rc,
-		)
-		if err := rp.runner.Run(ctx, "ssh",
-			"-o", "ControlPath="+cp,
-			host, patchCmd,
-		); err != nil {
-			slog.Warn("failed to patch remote shell profile", "host", host, "rc", rc, "err", err)
-		}
+	// Uses Python via heredoc stdin to avoid shell quoting issues.
+	// Handles both fresh installs and upgrade from the old single-line format.
+	// The if/else block actively unsets proxy vars when proxy.env is absent,
+	// so inherited env vars (e.g. from VSCode server forks) are cleared correctly.
+	patchCmd := `python3 - << 'PYEOF'
+import os
+OLD_LINE = '[ -f "$HOME/.sshmux/proxy.env" ] && source "$HOME/.sshmux/proxy.env"'
+NEW_BLOCK = '''# sshmux: terminal proxy
+if [ -f "$HOME/.sshmux/proxy.env" ]; then
+  source "$HOME/.sshmux/proxy.env"
+else
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+fi'''
+for rcfile in ['~/.bashrc', '~/.zshrc']:
+    p = os.path.expanduser(rcfile)
+    if not os.path.exists(p):
+        continue
+    c = open(p).read()
+    old_block = '# sshmux: terminal proxy\n' + OLD_LINE
+    if old_block in c:
+        open(p, 'w').write(c.replace(old_block, NEW_BLOCK))
+    elif '# sshmux: terminal proxy' not in c:
+        open(p, 'a').write('\n' + NEW_BLOCK + '\n')
+PYEOF`
+	if err := rp.runner.Run(ctx, "ssh",
+		"-o", "ControlPath="+cp,
+		host, patchCmd,
+	); err != nil {
+		slog.Warn("failed to patch remote shell profiles", "host", host, "err", err)
 	}
 
 	slog.Info("remote-proxy enabled", "host", host, "http_addr", httpAddr, "socks_addr", socksAddr)

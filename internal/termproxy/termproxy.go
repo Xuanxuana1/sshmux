@@ -11,8 +11,13 @@ import (
 )
 
 const (
-	markerLine = "# sshmux: terminal proxy"
-	sourceLine = `[ -f "$HOME/.sshmux/proxy.env" ] && source "$HOME/.sshmux/proxy.env"`
+	markerLine    = "# sshmux: terminal proxy"
+	oldSourceLine = `[ -f "$HOME/.sshmux/proxy.env" ] && source "$HOME/.sshmux/proxy.env"`
+	sourceLine    = `if [ -f "$HOME/.sshmux/proxy.env" ]; then
+  source "$HOME/.sshmux/proxy.env"
+else
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+fi`
 )
 
 // Enable turns on terminal-proxy: saves config, writes proxy.env, patches shell profiles.
@@ -136,32 +141,41 @@ func PatchProfile() error {
 	return nil
 }
 
-// patchSingleProfile appends the source line to a single profile file if not present.
+// patchSingleProfile appends the source block to a single profile file if not present.
+// If the old single-line format is detected, it is upgraded to the if/else format in-place.
 func patchSingleProfile(path string) error {
-	// Read existing content
 	data, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read profile: %w", err)
 	}
 
 	content := string(data)
+	newBlock := markerLine + "\n" + sourceLine + "\n"
+	oldBlock := markerLine + "\n" + oldSourceLine + "\n"
 
-	// Check if already patched (idempotent)
 	if strings.Contains(content, markerLine) {
-		slog.Debug("profile already patched", "path", path)
+		if strings.Contains(content, oldSourceLine) {
+			// Upgrade: old single-line format → new if/else format.
+			// This ensures inherited env vars are actively unset when proxy.env is absent.
+			newContent := strings.Replace(content, oldBlock, newBlock, 1)
+			if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {
+				return fmt.Errorf("upgrade profile: %w", err)
+			}
+			slog.Debug("profile upgraded to unset format", "path", path)
+		} else {
+			slog.Debug("profile already patched", "path", path)
+		}
 		return nil
 	}
 
-	// Append source line
-	appendContent := "\n" + markerLine + "\n" + sourceLine + "\n"
-
+	// Not patched yet — append.
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("open profile for append: %w", err)
 	}
 	defer f.Close()
 
-	if _, err := f.WriteString(appendContent); err != nil {
+	if _, err := f.WriteString("\n" + newBlock); err != nil {
 		return fmt.Errorf("append to profile: %w", err)
 	}
 

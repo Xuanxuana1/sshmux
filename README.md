@@ -16,6 +16,8 @@ curl -fsSL https://raw.githubusercontent.com/Xuanxuana1/sshmux/main/install.sh |
 
 自动识别 Intel / Apple Silicon 架构，从 GitHub Releases 下载最新版本，安装到 `~/bin/sshmux`，并自动导入 SSH 主机。
 
+> 安装完成后，`~/bin/sshmux` 是一个轻量 wrapper，真正的二进制位于 `~/.sshmux/bin/sshmux-real`。
+
 确保 `~/bin` 在你的 `PATH` 里（如没有，在 `~/.zshrc` 加一行）：
 
 ```bash

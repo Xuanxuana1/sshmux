@@ -3,6 +3,8 @@ set -e
 
 REPO="Xuanxuana1/sshmux"
 INSTALL_DIR="$HOME/bin"
+REAL_DIR="$HOME/.sshmux/bin"
+REAL_BIN="$REAL_DIR/sshmux-real"
 
 # Detect architecture
 ARCH=$(uname -m)
@@ -16,9 +18,18 @@ URL="https://github.com/$REPO/releases/latest/download/$BINARY"
 
 echo "Downloading sshmux ($ARCH)..."
 mkdir -p "$INSTALL_DIR"
-curl -fsSL "$URL" -o "$INSTALL_DIR/sshmux"
+mkdir -p "$REAL_DIR"
+curl -fsSL "$URL" -o "$REAL_BIN"
+chmod 755 "$REAL_BIN"
+
+cat > "$INSTALL_DIR/sshmux" <<'EOF'
+#!/bin/sh
+exec "$HOME/.sshmux/bin/sshmux-real" "$@"
+EOF
 chmod 755 "$INSTALL_DIR/sshmux"
-echo "Installed to $INSTALL_DIR/sshmux"
+
+echo "Installed wrapper to $INSTALL_DIR/sshmux"
+echo "Installed binary to $REAL_BIN"
 
 # Add ~/bin to PATH if not already present
 if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
