@@ -700,8 +700,16 @@ func (m model) toggleRemoteProxy() (tea.Model, tea.Cmd) {
 			m.statusErr = true
 			return m, nil
 		}
-		if err := rp.Enable(ctx, h.HostAlias, httpAddr, socksAddr); err != nil {
-			m.statusMsg = fmt.Sprintf("remote-proxy enable failed: %v", err)
+		var enableErr error
+		if shared := m.findSharedRPxHost(h); shared != nil {
+			// Another host alias on the same physical server already has an active
+			// RPx forward. Skip creating a duplicate forward; just write proxy.env.
+			enableErr = rp.WriteEnvOnly(ctx, h.HostAlias, httpAddr, socksAddr)
+		} else {
+			enableErr = rp.Enable(ctx, h.HostAlias, httpAddr, socksAddr)
+		}
+		if enableErr != nil {
+			m.statusMsg = fmt.Sprintf("remote-proxy enable failed: %v", enableErr)
 			m.statusErr = true
 			return m, nil
 		}
@@ -715,6 +723,22 @@ func (m model) toggleRemoteProxy() (tea.Model, tea.Cmd) {
 		m.statusErr = false
 	}
 	return m, nil
+}
+
+// findSharedRPxHost returns the first host in the model that shares the same
+// physical server (Hostname + Port) as h, has RemoteProxyEnabled = true, and
+// is not h itself. Returns nil if no such host exists.
+func (m model) findSharedRPxHost(h *state.HostState) *state.HostState {
+	for i := range m.hosts {
+		other := &m.hosts[i]
+		if other.HostAlias == h.HostAlias {
+			continue
+		}
+		if other.Hostname == h.Hostname && other.Port == h.Port && other.RemoteProxyEnabled {
+			return other
+		}
+	}
+	return nil
 }
 
 func (m model) importHosts() (tea.Model, tea.Cmd) {

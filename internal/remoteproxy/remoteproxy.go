@@ -53,7 +53,31 @@ func (rp *RemoteProxy) Enable(ctx context.Context, host string, httpAddr, socksA
 		}
 	}
 
-	// Write proxy.env on remote
+	if err := rp.writeRemoteEnv(ctx, host, cp, httpAddr, socksAddr); err != nil {
+		return fmt.Errorf("remote-proxy enable %s: %w", host, err)
+	}
+
+	slog.Info("remote-proxy enabled", "host", host, "http_addr", httpAddr, "socks_addr", socksAddr)
+	return nil
+}
+
+// WriteEnvOnly writes proxy.env and patches shell profiles on the remote host
+// without setting up a new port forward. Use when a port forward is already
+// active on the same physical server via another SSH session.
+func (rp *RemoteProxy) WriteEnvOnly(ctx context.Context, host string, httpAddr, socksAddr string) error {
+	cp, err := sshControlPath()
+	if err != nil {
+		return fmt.Errorf("remote-proxy write-env %s: %w", host, err)
+	}
+	if err := rp.writeRemoteEnv(ctx, host, cp, httpAddr, socksAddr); err != nil {
+		return fmt.Errorf("remote-proxy write-env %s: %w", host, err)
+	}
+	slog.Info("remote-proxy env written (shared tunnel)", "host", host, "http_addr", httpAddr, "socks_addr", socksAddr)
+	return nil
+}
+
+// writeRemoteEnv writes proxy.env and patches remote shell profiles.
+func (rp *RemoteProxy) writeRemoteEnv(ctx context.Context, host, cp, httpAddr, socksAddr string) error {
 	envContent := BuildRemoteEnvContent(httpAddr, socksAddr)
 	writeCmd := fmt.Sprintf("mkdir -p ~/.sshmux && cat > ~/.sshmux/proxy.env << 'SSHMUX_EOF'\n%sSSHMUX_EOF", envContent)
 
@@ -62,7 +86,7 @@ func (rp *RemoteProxy) Enable(ctx context.Context, host string, httpAddr, socksA
 		"-o", "ControlPath="+cp,
 		host, writeCmd,
 	); err != nil {
-		return fmt.Errorf("remote-proxy enable %s: write proxy.env: %w", host, err)
+		return fmt.Errorf("write proxy.env: %w", err)
 	}
 
 	// Patch remote shell profiles (.bashrc and .zshrc, idempotent).
@@ -97,7 +121,6 @@ PYEOF`
 		slog.Warn("failed to patch remote shell profiles", "host", host, "err", err)
 	}
 
-	slog.Info("remote-proxy enabled", "host", host, "http_addr", httpAddr, "socks_addr", socksAddr)
 	return nil
 }
 
@@ -108,7 +131,7 @@ func (rp *RemoteProxy) Disable(ctx context.Context, host string, httpAddr, socks
 		return fmt.Errorf("remote-proxy disable %s: %w", host, err)
 	}
 
-	// Cancel forwards
+	// Cancel forwards (best-effort: may fail if forward was set up via another session)
 	forwards := uniqueForwards(httpAddr, socksAddr)
 	for _, fwd := range forwards {
 		slog.Debug("canceling reverse forward", "host", host, "remote_port", fwd.remotePort, "local_addr", fwd.localAddr)

@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -19,7 +20,12 @@ type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("run %s: %s: %w", name, msg, err)
+		}
 		return fmt.Errorf("run %s: %w", name, err)
 	}
 	return nil
@@ -37,7 +43,12 @@ func (ExecRunner) Output(ctx context.Context, name string, args ...string) ([]by
 func (ExecRunner) RunWithInput(ctx context.Context, input string, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = strings.NewReader(input)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("run %s: %s: %w", name, msg, err)
+		}
 		return fmt.Errorf("run %s: %w", name, err)
 	}
 	return nil
