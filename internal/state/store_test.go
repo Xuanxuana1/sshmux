@@ -177,3 +177,21 @@ func TestListHosts(t *testing.T) {
 		t.Fatalf("ListHosts returned %d hosts, want 2", len(listed))
 	}
 }
+
+func TestLoadGlobalConfig_DefaultsIncludeRemoteSource(t *testing.T) {
+	testStateDir(t)
+
+	cfg, err := LoadGlobalConfig()
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig: %v", err)
+	}
+	if cfg.RemoteSource != RemoteSourceSSHMux {
+		t.Fatalf("RemoteSource = %q, want %q", cfg.RemoteSource, RemoteSourceSSHMux)
+	}
+	if cfg.ExternalHTTPAddr != "127.0.0.1:7897" {
+		t.Fatalf("ExternalHTTPAddr = %q, want %q", cfg.ExternalHTTPAddr, "127.0.0.1:7897")
+	}
+	if cfg.ExternalSOCKSAddr != "127.0.0.1:7897" {
+		t.Fatalf("ExternalSOCKSAddr = %q, want %q", cfg.ExternalSOCKSAddr, "127.0.0.1:7897")
+	}
+}

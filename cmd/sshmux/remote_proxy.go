@@ -20,6 +20,9 @@ func newRemoteProxyCmd() *cobra.Command {
 
 	var httpAddr string
 	var socksAddr string
+	var bindAddress string
+	var dockerGateway bool
+	var loopbackOnly bool
 
 	onCmd := &cobra.Command{
 		Use:   "on <host>",
@@ -59,6 +62,14 @@ func newRemoteProxyCmd() *cobra.Command {
 				return fmt.Errorf("no proxy address specified")
 			}
 
+			opts := remoteproxy.Options{
+				HTTPAddr:      effectiveHTTP,
+				SOCKSAddr:     effectiveSOCKS,
+				BindAddress:   bindAddress,
+				DockerGateway: dockerGateway,
+				LoopbackOnly:  loopbackOnly,
+			}
+
 			// Load state to check for existing remote-proxy and handle port switch
 			s, _ := state.Load(host)
 			if s == nil {
@@ -66,43 +77,60 @@ func newRemoteProxyCmd() *cobra.Command {
 			}
 
 			rp := remoteproxy.NewRemoteProxy(ssh.ExecRunner{})
+			var activation remoteproxy.Activation
 
 			if s.RemoteProxyEnabled {
-				// Port switch: disable old, enable new
-				if err := rp.SetPort(ctx, host,
-					s.RemoteProxyHTTPAddr, s.RemoteProxySOCKSAddr,
-					effectiveHTTP, effectiveSOCKS,
-				); err != nil {
+				var err error
+				activation, err = rp.SetPort(ctx, host, activationFromState(s), opts)
+				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					return err
 				}
 			} else {
-				if err := rp.Enable(ctx, host, effectiveHTTP, effectiveSOCKS); err != nil {
+				var err error
+				activation, err = rp.Enable(ctx, host, opts)
+				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					return err
 				}
 			}
 
 			s.RemoteProxyEnabled = true
-			s.RemoteProxyHTTPAddr = effectiveHTTP
-			s.RemoteProxySOCKSAddr = effectiveSOCKS
+			applyActivationToState(s, activation)
 			s.LastError = ""
 			if err := state.Save(s); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not save state: %v\n", err)
 			}
 
 			fmt.Printf("Remote proxy enabled for %s\n", host)
-			if effectiveHTTP != "" {
-				fmt.Printf("  HTTP:  %s\n", effectiveHTTP)
+			if activation.HTTPAddr != "" {
+				fmt.Printf("  Source HTTP:     %s\n", activation.HTTPAddr)
 			}
-			if effectiveSOCKS != "" {
-				fmt.Printf("  SOCKS: %s\n", effectiveSOCKS)
+			if activation.SOCKSAddr != "" {
+				fmt.Printf("  Source SOCKS:    %s\n", activation.SOCKSAddr)
+			}
+			if activation.ShellHTTPAddr() != "" {
+				fmt.Printf("  Remote shell:    %s\n", activation.ShellHTTPAddr())
+			}
+			if activation.BindAddress != "" {
+				fmt.Printf("  Container bind:  %s\n", activation.BindAddress)
+				if activation.ExposedHTTPAddr != "" {
+					fmt.Printf("  Container HTTP:  %s\n", activation.ExposedHTTPAddr)
+				}
+				if activation.ExposedSOCKSAddr != "" {
+					fmt.Printf("  Container SOCKS: %s\n", activation.ExposedSOCKSAddr)
+				}
+			} else {
+				fmt.Printf("  Container mode:  loopback-only\n")
 			}
 			return nil
 		},
 	}
 	onCmd.Flags().StringVar(&httpAddr, "http", "", "HTTP proxy address (e.g. 127.0.0.1:7897)")
 	onCmd.Flags().StringVar(&socksAddr, "socks", "", "SOCKS proxy address (e.g. 127.0.0.1:7897)")
+	onCmd.Flags().StringVar(&bindAddress, "bind-address", "", "Bind relay on the remote host for Docker/container access (e.g. 172.17.0.1)")
+	onCmd.Flags().BoolVar(&dockerGateway, "docker-gateway", true, "Auto-detect the remote Docker bridge gateway and expose the proxy there")
+	onCmd.Flags().BoolVar(&loopbackOnly, "loopback-only", false, "Keep remote-proxy bound to 127.0.0.1 only")
 
 	offCmd := &cobra.Command{
 		Use:   "off <host>",
@@ -119,12 +147,13 @@ func newRemoteProxyCmd() *cobra.Command {
 			}
 
 			rp := remoteproxy.NewRemoteProxy(ssh.ExecRunner{})
-			if err := rp.Disable(ctx, host, s.RemoteProxyHTTPAddr, s.RemoteProxySOCKSAddr); err != nil {
+			if err := rp.Disable(ctx, host, activationFromState(s)); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				return err
 			}
 
 			s.RemoteProxyEnabled = false
+			clearActivationState(s)
 			s.LastError = ""
 			if err := state.Save(s); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not save state: %v\n", err)
@@ -158,10 +187,23 @@ func newRemoteProxyCmd() *cobra.Command {
 				fmt.Printf("Remote proxy for %s: disabled\n", host)
 			}
 			if s.RemoteProxyHTTPAddr != "" {
-				fmt.Printf("  HTTP:  %s\n", s.RemoteProxyHTTPAddr)
+				fmt.Printf("  Source HTTP:     %s\n", s.RemoteProxyHTTPAddr)
 			}
 			if s.RemoteProxySOCKSAddr != "" {
-				fmt.Printf("  SOCKS: %s\n", s.RemoteProxySOCKSAddr)
+				fmt.Printf("  Source SOCKS:    %s\n", s.RemoteProxySOCKSAddr)
+			}
+			activation := activationFromState(s)
+			if activation.ShellHTTPAddr() != "" {
+				fmt.Printf("  Remote shell:    %s\n", activation.ShellHTTPAddr())
+			}
+			if s.RemoteProxyBindAddr != "" {
+				fmt.Printf("  Container bind:  %s\n", s.RemoteProxyBindAddr)
+			}
+			if s.RemoteProxyExposedHTTPAddr != "" {
+				fmt.Printf("  Container HTTP:  %s\n", s.RemoteProxyExposedHTTPAddr)
+			}
+			if s.RemoteProxyExposedSOCKSAddr != "" {
+				fmt.Printf("  Container SOCKS: %s\n", s.RemoteProxyExposedSOCKSAddr)
 			}
 			return nil
 		},
@@ -169,4 +211,33 @@ func newRemoteProxyCmd() *cobra.Command {
 
 	rpCmd.AddCommand(onCmd, offCmd, statusCmd)
 	return rpCmd
+}
+
+func activationFromState(s *state.HostState) remoteproxy.Activation {
+	if s == nil {
+		return remoteproxy.Activation{}
+	}
+	return remoteproxy.Activation{
+		HTTPAddr:         s.RemoteProxyHTTPAddr,
+		SOCKSAddr:        s.RemoteProxySOCKSAddr,
+		BindAddress:      s.RemoteProxyBindAddr,
+		ExposedHTTPAddr:  s.RemoteProxyExposedHTTPAddr,
+		ExposedSOCKSAddr: s.RemoteProxyExposedSOCKSAddr,
+	}
+}
+
+func applyActivationToState(s *state.HostState, activation remoteproxy.Activation) {
+	s.RemoteProxyHTTPAddr = activation.HTTPAddr
+	s.RemoteProxySOCKSAddr = activation.SOCKSAddr
+	s.RemoteProxyBindAddr = activation.BindAddress
+	s.RemoteProxyExposedHTTPAddr = activation.ExposedHTTPAddr
+	s.RemoteProxyExposedSOCKSAddr = activation.ExposedSOCKSAddr
+}
+
+func clearActivationState(s *state.HostState) {
+	s.RemoteProxyHTTPAddr = ""
+	s.RemoteProxySOCKSAddr = ""
+	s.RemoteProxyBindAddr = ""
+	s.RemoteProxyExposedHTTPAddr = ""
+	s.RemoteProxyExposedSOCKSAddr = ""
 }

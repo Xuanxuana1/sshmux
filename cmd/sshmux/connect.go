@@ -117,7 +117,15 @@ func newStatusCmd() *cobra.Command {
 			fmt.Printf("SOCKS:            enabled=%v port=%d\n", s.SocksEnabled, s.SocksPort)
 			fmt.Printf("HTTP:             enabled=%v port=%d\n", s.HTTPEnabled, s.HTTPPort)
 			fmt.Printf("Mac Sync:         enabled=%v mode=%s service=%s\n", s.MacSyncEnabled, s.MacSyncMode, s.MacNetworkService)
-			fmt.Printf("Remote Proxy:     enabled=%v http=%s socks=%s\n", s.RemoteProxyEnabled, s.RemoteProxyHTTPAddr, s.RemoteProxySOCKSAddr)
+			fmt.Printf(
+				"Remote Proxy:     enabled=%v http=%s socks=%s bind=%s container_http=%s container_socks=%s\n",
+				s.RemoteProxyEnabled,
+				s.RemoteProxyHTTPAddr,
+				s.RemoteProxySOCKSAddr,
+				s.RemoteProxyBindAddr,
+				s.RemoteProxyExposedHTTPAddr,
+				s.RemoteProxyExposedSOCKSAddr,
+			)
 			if s.LastError != "" {
 				fmt.Printf("Last Error:       %s\n", s.LastError)
 			}

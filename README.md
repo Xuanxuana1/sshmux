@@ -89,9 +89,10 @@ sshmux
 | 按键 | 功能 |
 |------|------|
 | `↑` / `↓` 或 `k` / `j` | 上下移动光标，选择主机 |
-| `c` | 切换所选主机的 SSH 连接（建立 / 断开）。连接后代理自动启动 |
-| `m` | 切换 macOS 系统代理同步（需要先建立 SSH 连接） |
-| `r` | 切换 Remote Proxy（需要先建立 SSH 连接，且 Terminal Proxy 已开启） |
+| `c` | 切换所选主机的 SSH 连接（建立 / 断开）。`sshmux` 模式下会自动启动本地代理，`external` 模式下只建立 SSH |
+| `m` | 切换 macOS 系统代理同步（需要先建立 SSH 连接；External 模式下不可用） |
+| `r` | 切换 Remote Proxy（需要先建立 SSH 连接） |
+| `u` | 编辑 Remote Source：`sshmux` 或外部本地代理（如龙猫云 `127.0.0.1:7897`） |
 | `t` | 切换 Terminal Proxy（为当前终端会话注入 `http_proxy` / `https_proxy`） |
 | `p` | 编辑代理端口（SOCKS + HTTP 全局共用，Tab 切换字段，Enter 确认） |
 | `i` | 从 `~/.ssh/config` 导入所有主机 |
@@ -105,9 +106,15 @@ sshmux
 
 远程服务器（如 GPU 机器）本身没有外网，但你的 Mac 有代理。sshmux 通过 SSH 反向端口转发，把本机代理自动注入到服务器的环境变量里：
 
-1. 运行 `sshmux`，按 `t` 开启 Terminal Proxy（默认地址 `127.0.0.1:7897`，首次启动自动初始化）
+1. 运行 `sshmux`，按 `u` 把 Remote Source 切到 `external`，地址填龙猫云本地代理（如 `127.0.0.1:7897`）
 2. 按 `c` 建立 SSH 连接，按 `r` 开启 Remote Proxy
 3. SSH 登录服务器后，`http_proxy` / `https_proxy` 等环境变量自动生效，`pip install`、`wget`、`curl` 直接可用
+4. 若远端启用了 Docker，`remote-proxy` 会默认自动探测 `docker0` 网关，并额外暴露一个容器可达入口；Docker build / run 可直接用远端主机网关地址访问代理
+
+CLI 也支持显式控制容器入口：
+
+- `sshmux remote-proxy on <alias> --bind-address 172.17.0.1`：手动指定远端绑定地址
+- `sshmux remote-proxy on <alias> --loopback-only`：保留旧行为，只绑定远端 `127.0.0.1`
 
 ### 场景二：给本地终端临时配置代理
 
@@ -121,9 +128,10 @@ sshmux
 
 需要浏览器、Slack 等 GUI 应用也走代理：
 
-1. 按 `c` 建立 SSH 连接
-2. 按 `m` 同步到 macOS 系统网络设置，全局生效
-3. 用完再按 `m` 关闭，一键切回直连
+1. 按 `u` 确认 Remote Source 为 `sshmux`
+2. 按 `c` 建立 SSH 连接
+3. 按 `m` 同步到 macOS 系统网络设置，全局生效
+4. 用完再按 `m` 关闭，一键切回直连
 
 ### 场景四：多人协作 — 端口不一致时快速对齐
 
@@ -158,8 +166,11 @@ sshmux sync enable <alias>                             # 同步到 macOS 系统�
 sshmux sync disable <alias>                            # 关闭系统代理同步
 sshmux terminal-proxy on --http <addr> --socks <addr>  # 开启 Terminal Proxy（自定义地址，默认 127.0.0.1:7897）
 sshmux terminal-proxy off                              # 关闭 Terminal Proxy
-sshmux remote-proxy enable <alias>                     # 开启 Remote Proxy
-sshmux remote-proxy disable <alias>                    # 关闭 Remote Proxy
+sshmux remote-proxy on <alias>                         # 开启 Remote Proxy（默认自动探测 Docker gateway）
+sshmux remote-proxy on <alias> --bind-address <ip>     # 手动指定容器可达绑定地址
+sshmux remote-proxy on <alias> --loopback-only         # 只保留远端 127.0.0.1，不暴露给容器
+sshmux remote-proxy off <alias>                        # 关闭 Remote Proxy
+sshmux remote-proxy status <alias>                     # 查看 shell / container 端点
 sshmux import-hosts                                    # 从 ~/.ssh/config 导入主机
 ```
 

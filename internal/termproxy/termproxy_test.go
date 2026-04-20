@@ -15,8 +15,8 @@ func TestBuildEnvContent_AllAddrs(t *testing.T) {
 		`export https_proxy="http://127.0.0.1:7897"`,
 		`export HTTP_PROXY="http://127.0.0.1:7897"`,
 		`export HTTPS_PROXY="http://127.0.0.1:7897"`,
-		`export all_proxy="socks5://127.0.0.1:7897"`,
-		`export ALL_PROXY="socks5://127.0.0.1:7897"`,
+		`export all_proxy="socks5h://127.0.0.1:7897"`,
+		`export ALL_PROXY="socks5h://127.0.0.1:7897"`,
 		`export no_proxy="localhost,127.0.0.1"`,
 		`export NO_PROXY="localhost,127.0.0.1"`,
 	}
@@ -45,10 +45,13 @@ func TestBuildEnvContent_HTTPOnly(t *testing.T) {
 func TestBuildEnvContent_SOCKSOnly(t *testing.T) {
 	content := BuildEnvContent("", "127.0.0.1:1080")
 
-	if strings.Contains(content, "http_proxy") {
-		t.Error("should not contain http_proxy when http addr is empty")
+	if !strings.Contains(content, `export http_proxy="http://127.0.0.1:1080"`) {
+		t.Error("missing http_proxy line for socks-only config")
 	}
-	if !strings.Contains(content, `export all_proxy="socks5://127.0.0.1:1080"`) {
+	if !strings.Contains(content, `export https_proxy="http://127.0.0.1:1080"`) {
+		t.Error("missing https_proxy line for socks-only config")
+	}
+	if !strings.Contains(content, `export all_proxy="socks5h://127.0.0.1:1080"`) {
 		t.Error("missing all_proxy line")
 	}
 	if !strings.Contains(content, "no_proxy") {
@@ -60,10 +63,16 @@ func TestBuildEnvContent_DifferentPorts(t *testing.T) {
 	content := BuildEnvContent("127.0.0.1:8080", "127.0.0.1:1080")
 
 	if !strings.Contains(content, `export http_proxy="http://127.0.0.1:8080"`) {
-		t.Error("missing http_proxy with port 8080")
+		t.Error("missing http_proxy with http port 8080")
 	}
-	if !strings.Contains(content, `export all_proxy="socks5://127.0.0.1:1080"`) {
+	if !strings.Contains(content, `export https_proxy="http://127.0.0.1:8080"`) {
+		t.Error("missing https_proxy with http port 8080")
+	}
+	if !strings.Contains(content, `export all_proxy="socks5h://127.0.0.1:1080"`) {
 		t.Error("missing all_proxy with port 1080")
+	}
+	if strings.Contains(content, `socks5h://127.0.0.1:1080"\nexport https_proxy`) {
+		t.Error("http/https proxy exports should not use socks5h when http addr is available")
 	}
 }
 

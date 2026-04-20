@@ -13,25 +13,25 @@ func TestEnable_ForwardCommandArgs(t *testing.T) {
 		name      string
 		httpAddr  string
 		socksAddr string
-		wantParts []string // substrings expected in the ssh forward calls
+		wantPorts []string
 	}{
 		{
 			name:      "http only",
 			httpAddr:  "127.0.0.1:7897",
 			socksAddr: "",
-			wantParts: []string{"-R", "7897:127.0.0.1:7897"},
+			wantPorts: []string{"7897"},
 		},
 		{
 			name:      "socks only",
 			httpAddr:  "",
 			socksAddr: "127.0.0.1:1080",
-			wantParts: []string{"-R", "1080:127.0.0.1:1080"},
+			wantPorts: []string{"1080"},
 		},
 		{
-			name:      "same address deduplicates",
+			name:      "same port deduplicates",
 			httpAddr:  "127.0.0.1:7897",
-			socksAddr: "127.0.0.1:7897",
-			wantParts: []string{"-R", "7897:127.0.0.1:7897"},
+			socksAddr: "localhost:7897",
+			wantPorts: []string{"7897"},
 		},
 	}
 
@@ -40,29 +40,96 @@ func TestEnable_ForwardCommandArgs(t *testing.T) {
 			fake := &ssh.FakeRunner{}
 			rp := NewRemoteProxy(fake)
 
-			_ = rp.Enable(context.Background(), "testhost", tt.httpAddr, tt.socksAddr)
+			_, err := rp.Enable(context.Background(), "testhost", Options{
+				HTTPAddr:  tt.httpAddr,
+				SOCKSAddr: tt.socksAddr,
+			})
+			if err != nil {
+				t.Fatalf("Enable returned error: %v", err)
+			}
 
-			// Find forward calls
-			foundForward := false
+			foundPorts := make(map[string]bool)
 			for _, c := range fake.Calls {
-				if c.Name == "ssh" {
-					argsStr := strings.Join(c.Args, " ")
-					allFound := true
-					for _, part := range tt.wantParts {
-						if !strings.Contains(argsStr, part) {
-							allFound = false
+				if c.Name != "ssh" || !contains(c.Args, "-O") || !contains(c.Args, "forward") {
+					continue
+				}
+				for i, arg := range c.Args {
+					if arg == "-R" && i+1 < len(c.Args) {
+						parts := strings.SplitN(c.Args[i+1], ":", 2)
+						if len(parts) >= 1 {
+							foundPorts[parts[0]] = true
 						}
-					}
-					if allFound && strings.Contains(argsStr, "-O forward") {
-						foundForward = true
 					}
 				}
 			}
 
-			if !foundForward {
-				t.Errorf("expected ssh forward call with %v, got calls: %v", tt.wantParts, fake.Calls)
+			for _, port := range tt.wantPorts {
+				if !foundPorts[port] {
+					t.Errorf("expected forward for port %s, got ports: %v", port, foundPorts)
+				}
 			}
 		})
+	}
+}
+
+func TestEnable_DetectsDockerGatewayAndStartsRelay(t *testing.T) {
+	fake := &ssh.FakeRunner{OutputData: []byte("172.17.0.1\n")}
+	rp := NewRemoteProxy(fake)
+
+	activation, err := rp.Enable(context.Background(), "testhost", Options{
+		HTTPAddr:      "127.0.0.1:7897",
+		SOCKSAddr:     "127.0.0.1:7897",
+		DockerGateway: true,
+	})
+	if err != nil {
+		t.Fatalf("Enable returned error: %v", err)
+	}
+	if activation.BindAddress != "172.17.0.1" {
+		t.Fatalf("BindAddress = %q, want %q", activation.BindAddress, "172.17.0.1")
+	}
+	if activation.ExposedHTTPAddr != "172.17.0.1:7897" {
+		t.Fatalf("ExposedHTTPAddr = %q, want %q", activation.ExposedHTTPAddr, "172.17.0.1:7897")
+	}
+
+	foundRelayStart := false
+	for _, c := range fake.Calls {
+		if c.Name != "ssh" || len(c.Args) == 0 {
+			continue
+		}
+		cmd := c.Args[len(c.Args)-1]
+		if strings.Contains(cmd, "remote-proxy-relay-7897.pid") && strings.Contains(cmd, `bind = "172.17.0.1"`) {
+			foundRelayStart = true
+			break
+		}
+	}
+	if !foundRelayStart {
+		t.Fatalf("expected relay start command, got calls: %v", fake.Calls)
+	}
+}
+
+func TestEnable_LoopbackOnlySkipsDockerGatewayAndRelay(t *testing.T) {
+	fake := &ssh.FakeRunner{OutputData: []byte("172.17.0.1\n")}
+	rp := NewRemoteProxy(fake)
+
+	activation, err := rp.Enable(context.Background(), "testhost", Options{
+		HTTPAddr:     "127.0.0.1:7897",
+		LoopbackOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("Enable returned error: %v", err)
+	}
+	if activation.BindAddress != "" {
+		t.Fatalf("BindAddress = %q, want empty", activation.BindAddress)
+	}
+
+	for _, c := range fake.Calls {
+		if c.Name != "ssh" || len(c.Args) == 0 {
+			continue
+		}
+		cmd := c.Args[len(c.Args)-1]
+		if strings.Contains(cmd, "docker0") || strings.Contains(cmd, "remote-proxy-relay-") {
+			t.Fatalf("unexpected docker gateway or relay command: %q", cmd)
+		}
 	}
 }
 
@@ -70,20 +137,54 @@ func TestDisable_CancelCommandArgs(t *testing.T) {
 	fake := &ssh.FakeRunner{}
 	rp := NewRemoteProxy(fake)
 
-	_ = rp.Disable(context.Background(), "testhost", "127.0.0.1:7897", "")
+	err := rp.Disable(context.Background(), "testhost", Activation{
+		HTTPAddr: "127.0.0.1:7897",
+	})
+	if err != nil {
+		t.Fatalf("Disable returned error: %v", err)
+	}
 
 	foundCancel := false
 	for _, c := range fake.Calls {
-		if c.Name == "ssh" {
-			argsStr := strings.Join(c.Args, " ")
-			if strings.Contains(argsStr, "-O cancel") && strings.Contains(argsStr, "-R 7897:127.0.0.1:7897") {
-				foundCancel = true
-			}
+		if c.Name != "ssh" {
+			continue
+		}
+		argsStr := strings.Join(c.Args, " ")
+		if strings.Contains(argsStr, "-O cancel") && strings.Contains(argsStr, "-R 7897:") {
+			foundCancel = true
 		}
 	}
 
 	if !foundCancel {
-		t.Errorf("expected ssh cancel call, got calls: %v", fake.Calls)
+		t.Errorf("expected ssh cancel call for port 7897, got calls: %v", fake.Calls)
+	}
+}
+
+func TestDisable_StopsRelayWhenBindAddressSet(t *testing.T) {
+	fake := &ssh.FakeRunner{}
+	rp := NewRemoteProxy(fake)
+
+	err := rp.Disable(context.Background(), "testhost", Activation{
+		HTTPAddr:    "127.0.0.1:7897",
+		BindAddress: "172.17.0.1",
+	})
+	if err != nil {
+		t.Fatalf("Disable returned error: %v", err)
+	}
+
+	foundRelayStop := false
+	for _, c := range fake.Calls {
+		if c.Name != "ssh" || len(c.Args) == 0 {
+			continue
+		}
+		cmd := c.Args[len(c.Args)-1]
+		if strings.Contains(cmd, "remote-proxy-relay-7897.pid") && strings.Contains(cmd, "os.kill(pid, signal.SIGTERM)") {
+			foundRelayStop = true
+			break
+		}
+	}
+	if !foundRelayStop {
+		t.Fatalf("expected relay stop command, got calls: %v", fake.Calls)
 	}
 }
 
@@ -93,7 +194,7 @@ func TestBuildRemoteEnvContent_HTTPAndSOCKS(t *testing.T) {
 	expected := []string{
 		`export http_proxy="http://127.0.0.1:7897"`,
 		`export https_proxy="http://127.0.0.1:7897"`,
-		`export all_proxy="socks5://127.0.0.1:1080"`,
+		`export all_proxy="socks5h://127.0.0.1:1080"`,
 		`export no_proxy="localhost,127.0.0.1"`,
 	}
 
@@ -104,14 +205,14 @@ func TestBuildRemoteEnvContent_HTTPAndSOCKS(t *testing.T) {
 	}
 }
 
-func TestBuildRemoteEnvContent_SameAddr(t *testing.T) {
-	content := BuildRemoteEnvContent("127.0.0.1:7897", "127.0.0.1:7897")
+func TestBuildRemoteEnvContent_SocksOnlyUsesHTTPFallback(t *testing.T) {
+	content := BuildRemoteEnvContent("", "127.0.0.1:1080")
 
-	if !strings.Contains(content, `export http_proxy="http://127.0.0.1:7897"`) {
-		t.Error("missing http_proxy")
+	if !strings.Contains(content, `export http_proxy="http://127.0.0.1:1080"`) {
+		t.Fatalf("expected HTTP fallback to SOCKS port, got: %s", content)
 	}
-	if !strings.Contains(content, `export all_proxy="socks5://127.0.0.1:7897"`) {
-		t.Error("missing all_proxy")
+	if !strings.Contains(content, `export all_proxy="socks5h://127.0.0.1:1080"`) {
+		t.Fatalf("expected socks5h all_proxy, got: %s", content)
 	}
 }
 
@@ -126,7 +227,8 @@ func TestUniqueForwards_Deduplication(t *testing.T) {
 		{"http only", "127.0.0.1:7897", "", 1},
 		{"socks only", "", "127.0.0.1:1080", 1},
 		{"same address", "127.0.0.1:7897", "127.0.0.1:7897", 1},
-		{"different addresses", "127.0.0.1:7897", "127.0.0.1:1080", 2},
+		{"same port different host", "127.0.0.1:7897", "localhost:7897", 1},
+		{"different ports", "127.0.0.1:7897", "127.0.0.1:1080", 2},
 	}
 
 	for _, tt := range tests {
@@ -159,24 +261,39 @@ func TestExtractPort(t *testing.T) {
 	}
 }
 
-func TestEnable_SameAddrSingleForward(t *testing.T) {
+func TestEnable_PatchesShellProfilesEvenWhenMissing(t *testing.T) {
 	fake := &ssh.FakeRunner{}
 	rp := NewRemoteProxy(fake)
 
-	_ = rp.Enable(context.Background(), "testhost", "127.0.0.1:7897", "127.0.0.1:7897")
+	_, err := rp.Enable(context.Background(), "testhost", Options{
+		HTTPAddr: "127.0.0.1:7897",
+	})
+	if err != nil {
+		t.Fatalf("Enable returned error: %v", err)
+	}
 
-	// Count forward calls (should be exactly 1 since addresses are the same)
-	forwardCount := 0
+	foundPatch := false
 	for _, c := range fake.Calls {
-		if c.Name == "ssh" {
-			argsStr := strings.Join(c.Args, " ")
-			if strings.Contains(argsStr, "-O forward") {
-				forwardCount++
-			}
+		if c.Name != "ssh" || len(c.Args) < 3 {
+			continue
+		}
+		cmd := c.Args[len(c.Args)-1]
+		if strings.Contains(cmd, "open(p, 'a').close()") {
+			foundPatch = true
+			break
 		}
 	}
 
-	if forwardCount != 1 {
-		t.Errorf("expected 1 forward call (dedup), got %d", forwardCount)
+	if !foundPatch {
+		t.Fatalf("expected remote patch command to create missing rc files, got calls: %v", fake.Calls)
 	}
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }

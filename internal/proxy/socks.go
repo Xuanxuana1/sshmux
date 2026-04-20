@@ -38,20 +38,9 @@ func socksPidPath(host string) (string, error) {
 	return filepath.Join(dir, host+".pid"), nil
 }
 
-func sshControlPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home dir: %w", err)
-	}
-	return filepath.Join(home, ".ssh", "cm-%C"), nil
-}
-
-// Enable starts a background SSH slave session through the ControlMaster with
-// a DynamicForward on the given port.
-//
-// ssh -O forward -D does NOT support DynamicForward (only -L/-R). Instead we
-// start a multiplexed slave connection with -D and manage its lifecycle via a
-// PID file, mirroring the HTTP proxy pattern.
+// Enable starts a dedicated background SSH connection with a DynamicForward on
+// the given port. This avoids leaving stale -D listeners attached to the SSH
+// ControlMaster after the proxy process exits.
 func (s *SOCKS) Enable(ctx context.Context, host string, port int) error {
 	dir, err := socksPidDir()
 	if err != nil {
@@ -61,19 +50,13 @@ func (s *SOCKS) Enable(ctx context.Context, host string, port int) error {
 		return fmt.Errorf("socks enable %s: create dir: %w", host, err)
 	}
 
-	cp, err := sshControlPath()
-	if err != nil {
-		return fmt.Errorf("socks enable %s: %w", host, err)
-	}
-
 	pidFile, err := socksPidPath(host)
 	if err != nil {
 		return fmt.Errorf("socks enable %s: %w", host, err)
 	}
 
 	cmd := exec.CommandContext(ctx, "ssh",
-		"-o", "ControlPath="+cp,
-		"-o", "ControlMaster=no",
+		"-o", "ExitOnForwardFailure=yes",
 		"-D", fmt.Sprintf("127.0.0.1:%d", port),
 		"-NnT",
 		host,

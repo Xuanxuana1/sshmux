@@ -169,6 +169,15 @@ func LoadGlobalConfig() (*GlobalConfig, error) {
 	if cfg.HTTPPort == 0 {
 		cfg.HTTPPort = 7897
 	}
+	if cfg.RemoteSource == "" {
+		cfg.RemoteSource = RemoteSourceSSHMux
+	}
+	if cfg.ExternalHTTPAddr == "" {
+		cfg.ExternalHTTPAddr = fmt.Sprintf("127.0.0.1:%d", cfg.HTTPPort)
+	}
+	if cfg.ExternalSOCKSAddr == "" {
+		cfg.ExternalSOCKSAddr = fmt.Sprintf("127.0.0.1:%d", cfg.SocksPort)
+	}
 	return cfg, nil
 }
 

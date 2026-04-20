@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -43,9 +44,10 @@ var (
 type editMode int
 
 const (
-	editNone    editMode = iota
-	editPorts            // 'p' key — edit global SOCKS + HTTP ports
-	editNewHost          // 'n' key — create a new host
+	editNone         editMode = iota
+	editPorts                 // 'p' key — edit global SOCKS + HTTP ports
+	editRemoteSource          // 'u' key — edit the remote-proxy source
+	editNewHost               // 'n' key — create a new host
 )
 
 // model holds all TUI state.
@@ -62,6 +64,10 @@ type model struct {
 	editing    editMode
 	portField  int // 0 = SOCKS, 1 = HTTP
 	portInputs [2]string
+
+	remoteSourceField int // 0 = source mode, 1 = HTTP, 2 = SOCKS
+	remoteSourceMode  state.RemoteSourceMode
+	remoteSourceInput [2]string
 
 	newHostField  int // 0=alias 1=hostname 2=user 3=port
 	newHostInputs [4]string
@@ -176,6 +182,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "p":
 			return m.startEditPorts()
 
+		case "u":
+			return m.startEditRemoteSource()
+
 		case "m":
 			return m.toggleMacSync()
 
@@ -205,9 +214,22 @@ func (m model) startEditPorts() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) startEditRemoteSource() (tea.Model, tea.Cmd) {
+	m.editing = editRemoteSource
+	m.remoteSourceField = 0
+	m.remoteSourceMode = m.globalCfg.RemoteSource
+	m.remoteSourceInput[0] = m.globalCfg.ExternalHTTPAddr
+	m.remoteSourceInput[1] = m.globalCfg.ExternalSOCKSAddr
+	m.statusMsg = ""
+	return m, nil
+}
+
 func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.editing == editNewHost {
 		return m.handleNewHostKey(msg)
+	}
+	if m.editing == editRemoteSource {
+		return m.handleRemoteSourceKey(msg)
 	}
 	switch msg.String() {
 	case "esc":
@@ -227,6 +249,53 @@ func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s := msg.String()
 		if len(s) == 1 && s >= "0" && s <= "9" && len(m.portInputs[m.portField]) < 5 {
 			m.portInputs[m.portField] += s
+		}
+		return m, nil
+	}
+}
+
+func (m model) handleRemoteSourceKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.editing = editNone
+		return m, nil
+	case "enter":
+		return m.confirmRemoteSource()
+	case "tab":
+		m.remoteSourceField = (m.remoteSourceField + 1) % 3
+		return m, nil
+	case "shift+tab":
+		m.remoteSourceField = (m.remoteSourceField + 2) % 3
+		return m, nil
+	case "left", "right", " ":
+		if m.remoteSourceField == 0 {
+			m.remoteSourceMode = toggleRemoteSourceMode(m.remoteSourceMode)
+		}
+		return m, nil
+	case "backspace":
+		if m.remoteSourceField == 0 {
+			return m, nil
+		}
+		field := m.remoteSourceField - 1
+		if len(m.remoteSourceInput[field]) > 0 {
+			m.remoteSourceInput[field] = m.remoteSourceInput[field][:len(m.remoteSourceInput[field])-1]
+		}
+		return m, nil
+	default:
+		if m.remoteSourceField == 0 {
+			switch strings.ToLower(msg.String()) {
+			case "s":
+				m.remoteSourceMode = state.RemoteSourceSSHMux
+			case "e":
+				m.remoteSourceMode = state.RemoteSourceExternal
+			}
+			return m, nil
+		}
+
+		s := msg.String()
+		if len(s) == 1 && s[0] >= 0x20 {
+			field := m.remoteSourceField - 1
+			m.remoteSourceInput[field] += s
 		}
 		return m, nil
 	}
@@ -297,6 +366,67 @@ func (m model) confirmPorts() (tea.Model, tea.Cmd) {
 	}
 
 	m.statusMsg = fmt.Sprintf("Ports updated — SOCKS :%d  HTTP :%d", socksPort, httpPort)
+	m.statusErr = false
+	return m, nil
+}
+
+func (m model) confirmRemoteSource() (tea.Model, tea.Cmd) {
+	m.editing = editNone
+
+	httpAddr := strings.TrimSpace(m.remoteSourceInput[0])
+	socksAddr := strings.TrimSpace(m.remoteSourceInput[1])
+	mode := m.remoteSourceMode
+	if mode == "" {
+		mode = state.RemoteSourceSSHMux
+	}
+
+	if mode == state.RemoteSourceExternal && httpAddr == "" && socksAddr == "" {
+		m.statusMsg = "external remote source needs at least one proxy address"
+		m.statusErr = true
+		return m, nil
+	}
+	if err := validateProxyAddr(httpAddr); err != nil {
+		m.statusMsg = fmt.Sprintf("invalid external HTTP address: %v", err)
+		m.statusErr = true
+		return m, nil
+	}
+	if err := validateProxyAddr(socksAddr); err != nil {
+		m.statusMsg = fmt.Sprintf("invalid external SOCKS address: %v", err)
+		m.statusErr = true
+		return m, nil
+	}
+
+	m.globalCfg.RemoteSource = mode
+	m.globalCfg.ExternalHTTPAddr = httpAddr
+	m.globalCfg.ExternalSOCKSAddr = socksAddr
+	if err := state.SaveGlobalConfig(m.globalCfg); err != nil {
+		m.statusMsg = fmt.Sprintf("save remote source failed: %v", err)
+		m.statusErr = true
+		return m, nil
+	}
+
+	if mode == state.RemoteSourceExternal {
+		stopped, stopErrs := m.stopAllLocalProxies()
+		if len(stopErrs) > 0 {
+			m.statusMsg = fmt.Sprintf(
+				"Remote source set to %s; stopped %d local proxy set(s); cleanup errors: %s",
+				strings.ToUpper(string(mode)),
+				stopped,
+				strings.Join(stopErrs, "; "),
+			)
+			m.statusErr = true
+			return m, nil
+		}
+		m.statusMsg = fmt.Sprintf(
+			"Remote source set to %s; stopped %d local proxy set(s)",
+			strings.ToUpper(string(mode)),
+			stopped,
+		)
+		m.statusErr = false
+		return m, nil
+	}
+
+	m.statusMsg = fmt.Sprintf("Remote source set to %s", strings.ToUpper(string(mode)))
 	m.statusErr = false
 	return m, nil
 }
@@ -453,13 +583,15 @@ func (m model) toggleSSH() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		h.MasterConnected = true
-		if err := m.enableLocalProxies(ctx, h); err != nil {
-			h.LastError = err.Error()
-			_ = state.Save(h)
-			m.hosts[m.cursor] = *h
-			m.statusMsg = fmt.Sprintf("SSH connected but local proxies failed: %v", err)
-			m.statusErr = true
-			return m, nil
+		if m.usesSSHMuxRemoteSource() {
+			if err := m.enableLocalProxies(ctx, h); err != nil {
+				h.LastError = err.Error()
+				_ = state.Save(h)
+				m.hosts[m.cursor] = *h
+				m.statusMsg = fmt.Sprintf("SSH connected but local proxies failed: %v", err)
+				m.statusErr = true
+				return m, nil
+			}
 		}
 		h.LastError = ""
 		_ = state.Save(h)
@@ -635,6 +767,11 @@ func (m model) toggleMacSync() (tea.Model, tea.Cmd) {
 		m.statusMsg = fmt.Sprintf("macOS sync disabled on %s", h.HostAlias)
 		m.statusErr = false
 	} else {
+		if !h.MacSyncEnabled && !m.usesSSHMuxRemoteSource() {
+			m.statusMsg = "macOS sync is unavailable in EXTERNAL source mode; let your proxy app manage system traffic or switch [u] back to SSHMUX"
+			m.statusErr = true
+			return m, nil
+		}
 		if !h.MasterConnected {
 			m.statusMsg = fmt.Sprintf("SSH not connected — press [c] to connect %s first", h.HostAlias)
 			m.statusErr = true
@@ -674,15 +811,31 @@ func (m model) toggleRemoteProxy() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	ctx := context.Background()
+	var connected bool
+	m, connected = m.ensureLiveSSHConnection(ctx, h)
+	if !connected {
+		return m, nil
+	}
 	rp := remoteproxy.NewRemoteProxy(m.runner)
 
 	if h.RemoteProxyEnabled {
-		if err := rp.Disable(ctx, h.HostAlias, h.RemoteProxyHTTPAddr, h.RemoteProxySOCKSAddr); err != nil {
+		if err := rp.Disable(ctx, h.HostAlias, remoteproxy.Activation{
+			HTTPAddr:         h.RemoteProxyHTTPAddr,
+			SOCKSAddr:        h.RemoteProxySOCKSAddr,
+			BindAddress:      h.RemoteProxyBindAddr,
+			ExposedHTTPAddr:  h.RemoteProxyExposedHTTPAddr,
+			ExposedSOCKSAddr: h.RemoteProxyExposedSOCKSAddr,
+		}); err != nil {
 			m.statusMsg = fmt.Sprintf("remote-proxy disable failed: %v", err)
 			m.statusErr = true
 			return m, nil
 		}
 		h.RemoteProxyEnabled = false
+		h.RemoteProxyHTTPAddr = ""
+		h.RemoteProxySOCKSAddr = ""
+		h.RemoteProxyBindAddr = ""
+		h.RemoteProxyExposedHTTPAddr = ""
+		h.RemoteProxyExposedSOCKSAddr = ""
 		h.LastError = ""
 		_ = state.Save(h)
 		m.hosts[m.cursor] = *h
@@ -694,19 +847,31 @@ func (m model) toggleRemoteProxy() (tea.Model, tea.Cmd) {
 			m.statusErr = true
 			return m, nil
 		}
-		httpAddr, socksAddr := remoteproxy.ResolveAddrs("", "")
+		httpAddr, socksAddr := m.remoteProxyAddrs()
 		if httpAddr == "" && socksAddr == "" {
-			m.statusMsg = "no proxy addresses configured; enable terminal-proxy first"
+			if m.usesSSHMuxRemoteSource() {
+				m.statusMsg = "no SSHMUX proxy addresses configured"
+			} else {
+				m.statusMsg = "no EXTERNAL proxy addresses configured; press [u] to set them"
+			}
 			m.statusErr = true
 			return m, nil
 		}
-		var enableErr error
+		opts := remoteproxy.Options{
+			HTTPAddr:      httpAddr,
+			SOCKSAddr:     socksAddr,
+			DockerGateway: true,
+		}
+		var (
+			enableErr  error
+			activation remoteproxy.Activation
+		)
 		if shared := m.findSharedRPxHost(h); shared != nil {
 			// Another host alias on the same physical server already has an active
 			// RPx forward. Skip creating a duplicate forward; just write proxy.env.
-			enableErr = rp.WriteEnvOnly(ctx, h.HostAlias, httpAddr, socksAddr)
+			activation, enableErr = rp.WriteEnvOnly(ctx, h.HostAlias, opts)
 		} else {
-			enableErr = rp.Enable(ctx, h.HostAlias, httpAddr, socksAddr)
+			activation, enableErr = rp.Enable(ctx, h.HostAlias, opts)
 		}
 		if enableErr != nil {
 			m.statusMsg = fmt.Sprintf("remote-proxy enable failed: %v", enableErr)
@@ -714,15 +879,46 @@ func (m model) toggleRemoteProxy() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		h.RemoteProxyEnabled = true
-		h.RemoteProxyHTTPAddr = httpAddr
-		h.RemoteProxySOCKSAddr = socksAddr
+		h.RemoteProxyHTTPAddr = activation.HTTPAddr
+		h.RemoteProxySOCKSAddr = activation.SOCKSAddr
+		h.RemoteProxyBindAddr = activation.BindAddress
+		h.RemoteProxyExposedHTTPAddr = activation.ExposedHTTPAddr
+		h.RemoteProxyExposedSOCKSAddr = activation.ExposedSOCKSAddr
 		h.LastError = ""
 		_ = state.Save(h)
 		m.hosts[m.cursor] = *h
-		m.statusMsg = fmt.Sprintf("remote-proxy enabled on %s", h.HostAlias)
+		if activation.BindAddress != "" {
+			m.statusMsg = fmt.Sprintf("remote-proxy enabled on %s via %s", h.HostAlias, activation.BindAddress)
+		} else {
+			m.statusMsg = fmt.Sprintf("remote-proxy enabled on %s", h.HostAlias)
+		}
 		m.statusErr = false
 	}
 	return m, nil
+}
+
+func (m model) ensureLiveSSHConnection(ctx context.Context, h *state.HostState) (model, bool) {
+	master := ssh.NewMaster(m.runner)
+	connected, err := master.IsConnected(ctx, h.HostAlias)
+	if err != nil {
+		m.statusMsg = fmt.Sprintf("check SSH status failed: %v", err)
+		m.statusErr = true
+		return m, false
+	}
+	if connected {
+		h.MasterConnected = true
+		return m, true
+	}
+
+	h.MasterConnected = false
+	h.SocksEnabled = false
+	h.HTTPEnabled = false
+	h.LastError = "SSH master not connected"
+	_ = state.Save(h)
+	m.hosts[m.cursor] = *h
+	m.statusMsg = fmt.Sprintf("SSH connection to %s is no longer active — press [c] to reconnect", h.HostAlias)
+	m.statusErr = true
+	return m, false
 }
 
 // findSharedRPxHost returns the first host in the model that shares the same
@@ -848,6 +1044,76 @@ func (m model) toggleTerminalProxy() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) usesSSHMuxRemoteSource() bool {
+	return m.globalCfg == nil || m.globalCfg.RemoteSource != state.RemoteSourceExternal
+}
+
+func (m *model) stopAllLocalProxies() (int, []string) {
+	ctx := context.Background()
+	stopped := 0
+	var errs []string
+
+	for i := range m.hosts {
+		h := &m.hosts[i]
+		if !h.SocksEnabled && !h.HTTPEnabled {
+			continue
+		}
+		if err := m.disableLocalProxies(ctx, h); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", h.HostAlias, err))
+			continue
+		}
+		h.LastError = ""
+		if err := state.Save(h); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: save state: %v", h.HostAlias, err))
+			continue
+		}
+		stopped++
+	}
+
+	return stopped, errs
+}
+
+func (m model) remoteProxyAddrs() (string, string) {
+	if !m.usesSSHMuxRemoteSource() {
+		return strings.TrimSpace(m.globalCfg.ExternalHTTPAddr), strings.TrimSpace(m.globalCfg.ExternalSOCKSAddr)
+	}
+
+	httpAddr := ""
+	socksAddr := ""
+	if m.termProxy != nil {
+		httpAddr = strings.TrimSpace(m.termProxy.HTTPAddr)
+		socksAddr = strings.TrimSpace(m.termProxy.SOCKSAddr)
+	}
+	if httpAddr == "" {
+		httpAddr = fmt.Sprintf("127.0.0.1:%d", m.globalCfg.HTTPPort)
+	}
+	if socksAddr == "" {
+		socksAddr = fmt.Sprintf("127.0.0.1:%d", m.globalCfg.SocksPort)
+	}
+	return httpAddr, socksAddr
+}
+
+func validateProxyAddr(addr string) error {
+	if addr == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if host == "" || port == "" {
+		return fmt.Errorf("want host:port")
+	}
+	return nil
+}
+
+func toggleRemoteSourceMode(mode state.RemoteSourceMode) state.RemoteSourceMode {
+	if mode == state.RemoteSourceExternal {
+		return state.RemoteSourceSSHMux
+	}
+	return state.RemoteSourceExternal
+}
+
 // View renders the TUI.
 func (m model) View() string {
 	var b strings.Builder
@@ -873,6 +1139,8 @@ func (m model) View() string {
 	b.WriteString("  ")
 	b.WriteString(renderHelp("[r]", "remote-proxy"))
 	b.WriteString("  ")
+	b.WriteString(renderHelp("[u]", "source"))
+	b.WriteString("  ")
 	b.WriteString(renderHelp("[p]", "ports"))
 	b.WriteString("  ")
 	b.WriteString(renderHelp("[i]", "import"))
@@ -894,6 +1162,23 @@ func (m model) View() string {
 	b.WriteString(" " + helpKeyStyle.Render(fmt.Sprintf(":%d", m.globalCfg.HTTPPort)))
 	b.WriteString("   ")
 	b.WriteString(renderHelp("[p]", "edit ports"))
+	b.WriteString("\n")
+
+	httpAddr, socksAddr := m.remoteProxyAddrs()
+	b.WriteString("  Remote Source  ")
+	if m.usesSSHMuxRemoteSource() {
+		b.WriteString(onlineStyle.Render("SSHMUX"))
+	} else {
+		b.WriteString(helpKeyStyle.Render("EXTERNAL"))
+	}
+	if httpAddr != "" {
+		b.WriteString("  http=" + httpAddr)
+	}
+	if socksAddr != "" {
+		b.WriteString("  socks=" + socksAddr)
+	}
+	b.WriteString("   ")
+	b.WriteString(renderHelp("[u]", "edit"))
 	b.WriteString("\n")
 
 	// Terminal proxy status line
@@ -937,6 +1222,27 @@ func (m model) View() string {
 		}
 		b.WriteString("  ")
 		b.WriteString(dimStyle.Render("[tab] switch field  [enter] confirm  [esc] cancel"))
+		b.WriteString("\n")
+	}
+
+	if m.editing == editRemoteSource {
+		b.WriteString("\n")
+		labels := []string{"Source", "HTTP  ", "SOCKS "}
+		values := []string{string(m.remoteSourceMode), m.remoteSourceInput[0], m.remoteSourceInput[1]}
+		for i, label := range labels {
+			b.WriteString("  ")
+			b.WriteString(dimStyle.Render(label + ":"))
+			b.WriteString("  ")
+			if m.remoteSourceField == i {
+				b.WriteString(helpKeyStyle.Render(values[i]))
+				b.WriteString(cursorStyle.Render("_"))
+			} else {
+				b.WriteString(values[i])
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("  ")
+		b.WriteString(dimStyle.Render("[tab] next field  [←/→/space] toggle source  [enter] confirm  [esc] cancel"))
 		b.WriteString("\n")
 	}
 

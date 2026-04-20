@@ -35,9 +35,12 @@ type HostState struct {
 	MacSyncMode       MacSyncMode `json:"mac_sync_mode"`
 	MacNetworkService string      `json:"mac_network_service"`
 
-	RemoteProxyEnabled   bool   `json:"remote_proxy_enabled"`
-	RemoteProxyHTTPAddr  string `json:"remote_proxy_http_addr,omitempty"`
-	RemoteProxySOCKSAddr string `json:"remote_proxy_socks_addr,omitempty"`
+	RemoteProxyEnabled          bool   `json:"remote_proxy_enabled"`
+	RemoteProxyHTTPAddr         string `json:"remote_proxy_http_addr,omitempty"`
+	RemoteProxySOCKSAddr        string `json:"remote_proxy_socks_addr,omitempty"`
+	RemoteProxyBindAddr         string `json:"remote_proxy_bind_addr,omitempty"`
+	RemoteProxyExposedHTTPAddr  string `json:"remote_proxy_exposed_http_addr,omitempty"`
+	RemoteProxyExposedSOCKSAddr string `json:"remote_proxy_exposed_socks_addr,omitempty"`
 
 	UpdatedAt time.Time `json:"updated_at"`
 	LastError string    `json:"last_error,omitempty"`
@@ -50,13 +53,30 @@ type TerminalProxyConfig struct {
 	SOCKSAddr string `json:"socks_addr"`
 }
 
+// RemoteSourceMode defines which local proxy source remote-proxy should use.
+type RemoteSourceMode string
+
+const (
+	RemoteSourceSSHMux   RemoteSourceMode = "sshmux"
+	RemoteSourceExternal RemoteSourceMode = "external"
+)
+
 // GlobalConfig holds settings shared across all hosts.
 type GlobalConfig struct {
-	SocksPort int `json:"socks_port"`
-	HTTPPort  int `json:"http_port"`
+	SocksPort         int              `json:"socks_port"`
+	HTTPPort          int              `json:"http_port"`
+	RemoteSource      RemoteSourceMode `json:"remote_source"`
+	ExternalHTTPAddr  string           `json:"external_http_addr,omitempty"`
+	ExternalSOCKSAddr string           `json:"external_socks_addr,omitempty"`
 }
 
 // DefaultGlobalConfig returns sensible defaults.
 func DefaultGlobalConfig() *GlobalConfig {
-	return &GlobalConfig{SocksPort: 7897, HTTPPort: 7897}
+	return &GlobalConfig{
+		SocksPort:         7897,
+		HTTPPort:          7897,
+		RemoteSource:      RemoteSourceSSHMux,
+		ExternalHTTPAddr:  "127.0.0.1:7897",
+		ExternalSOCKSAddr: "127.0.0.1:7897",
+	}
 }

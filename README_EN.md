@@ -106,6 +106,12 @@ GPU servers and similar machines often have no direct internet access, but your 
 1. Run `sshmux`, press `t` to enable Terminal Proxy (defaults to `127.0.0.1:7897`, auto-initialized on first launch)
 2. Press `c` to connect, then press `r` to enable Remote Proxy
 3. After SSH login, `http_proxy` / `https_proxy` are set automatically — `pip install`, `wget`, `curl` just work
+4. If Docker is present on the remote host, `remote-proxy` now auto-detects the `docker0` gateway and exposes an extra host-reachable endpoint for Docker build / run traffic
+
+You can also control the container-facing endpoint explicitly from CLI:
+
+- `sshmux remote-proxy on <alias> --bind-address 172.17.0.1`: bind the relay to a specific remote address
+- `sshmux remote-proxy on <alias> --loopback-only`: keep the old behavior and expose only remote `127.0.0.1`
 
 ### Set proxy for the current terminal only
 
@@ -156,8 +162,11 @@ sshmux sync enable <alias>                             # Sync to macOS system pr
 sshmux sync disable <alias>                            # Disable system proxy sync
 sshmux terminal-proxy on --http <addr> --socks <addr>  # Enable Terminal Proxy (custom addr; defaults to 127.0.0.1:7897)
 sshmux terminal-proxy off                              # Disable Terminal Proxy
-sshmux remote-proxy enable <alias>                     # Enable Remote Proxy
-sshmux remote-proxy disable <alias>                    # Disable Remote Proxy
+sshmux remote-proxy on <alias>                         # Enable Remote Proxy (auto-detect Docker gateway by default)
+sshmux remote-proxy on <alias> --bind-address <ip>     # Bind a Docker/container-facing relay explicitly
+sshmux remote-proxy on <alias> --loopback-only         # Keep remote-proxy on 127.0.0.1 only
+sshmux remote-proxy off <alias>                        # Disable Remote Proxy
+sshmux remote-proxy status <alias>                     # Show shell / container endpoints
 sshmux import-hosts                                    # Import from ~/.ssh/config
 ```
 

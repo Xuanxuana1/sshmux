@@ -103,16 +103,21 @@ func WriteEnvFile(cfg *state.TerminalProxyConfig) error {
 func BuildEnvContent(httpAddr, socksAddr string) string {
 	var b strings.Builder
 
-	if httpAddr != "" {
-		fmt.Fprintf(&b, "export http_proxy=\"http://%s\"\n", httpAddr)
-		fmt.Fprintf(&b, "export https_proxy=\"http://%s\"\n", httpAddr)
-		fmt.Fprintf(&b, "export HTTP_PROXY=\"http://%s\"\n", httpAddr)
-		fmt.Fprintf(&b, "export HTTPS_PROXY=\"http://%s\"\n", httpAddr)
+	effectiveHTTP := httpAddr
+	if effectiveHTTP == "" && socksAddr != "" {
+		effectiveHTTP = socksAddr
+	}
+
+	if effectiveHTTP != "" {
+		fmt.Fprintf(&b, "export http_proxy=\"http://%s\"\n", effectiveHTTP)
+		fmt.Fprintf(&b, "export https_proxy=\"http://%s\"\n", effectiveHTTP)
+		fmt.Fprintf(&b, "export HTTP_PROXY=\"http://%s\"\n", effectiveHTTP)
+		fmt.Fprintf(&b, "export HTTPS_PROXY=\"http://%s\"\n", effectiveHTTP)
 	}
 
 	if socksAddr != "" {
-		fmt.Fprintf(&b, "export all_proxy=\"socks5://%s\"\n", socksAddr)
-		fmt.Fprintf(&b, "export ALL_PROXY=\"socks5://%s\"\n", socksAddr)
+		fmt.Fprintf(&b, "export all_proxy=\"socks5h://%s\"\n", socksAddr)
+		fmt.Fprintf(&b, "export ALL_PROXY=\"socks5h://%s\"\n", socksAddr)
 	}
 
 	b.WriteString("export no_proxy=\"localhost,127.0.0.1\"\n")
